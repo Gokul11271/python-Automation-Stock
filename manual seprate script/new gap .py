@@ -18,7 +18,7 @@ SYMBOL = "XAUUSD_"    # trading symbol
 SLIPPAGE = 500
 MAGIC = 12345
 LOSS_TARGET = 500.0       # equity loss stop (in $)
-PROFIT_UNIT = 50          # profit per volume unit for TP calculation
+PROFIT_UNIT = 50000          # profit per volume unit for TP calculation
 
 # ------------------- Globals ------------------- #
 order_log = []  # stores history of triggered trades
@@ -221,6 +221,154 @@ def place_pending_stop(order_side: str, base_price: float, volume: float, max_at
             return None
 
 # ------------------- Trading Cycle ------------------- #
+# def run_cycle(vol_gen, gap):
+#     tick = mt5.symbol_info_tick(SYMBOL)
+#     if not tick:
+#         printl("❌ No tick data available. Cannot run cycle.")
+#         return "error"
+
+#     base_ask = tick.ask
+#     options = [round(base_ask + i * point * 10, digits) for i in range(1, 4)]
+#     print("\n👉 Choose starting BUY STOP price:")
+#     for i, val in enumerate(options, 1):
+#         print(f"{i}. {val}")
+#     choice = input("Enter choice (1/2/3 or custom price): ").strip()
+
+#     if choice in ["1", "2", "3"]:
+#         buy_price = options[int(choice) - 1]
+#     else:
+#         try:
+#             buy_price = float(choice)
+#         except ValueError:
+#             printl("Invalid price entered. Aborting cycle.")
+#             return "error"
+
+#     first_vol = next(vol_gen)
+#     cumulative_tp = first_vol * PROFIT_UNIT
+#     active_price = place_pending_stop("BUY", buy_price, first_vol)
+#     if not active_price:
+#         return "error"
+
+#     last_buy_price = buy_price
+#     last_order_type = "BUY"
+#     last_positions = mt5.positions_get(symbol=SYMBOL) or []
+#     last_pos_count = len(last_positions)
+#     baseline_equity = account_equity_profit()
+#     triggered_count = 0
+#     last_trigger_info = None
+
+#     printl(f"📌 Baseline equity set at {baseline_equity:.2f}")
+#     printl(f"💰 Initial cumulative TP target = ${cumulative_tp:.2f}\n")
+
+#     # ---------------- MAIN LOOP ----------------
+#     while True:
+#         time.sleep(1)
+#         ai = mt5.account_info()
+#         if ai:
+#             print(f"\r💵 Balance: {ai.balance:.2f} | 📊 Profit: {ai.profit:+.2f} | 🎯 TP Target: {cumulative_tp:.2f}", end="", flush=True)
+
+#         acc_profit = account_equity_profit()
+#         positions = mt5.positions_get(symbol=SYMBOL) or []
+
+#         if not positions:
+#             continue
+
+#         current_count = len(positions)
+#         if current_count > last_pos_count:
+#             last_ticket_set = {lp.ticket for lp in last_positions}
+#             new_positions = [p for p in positions if p.ticket not in last_ticket_set]
+
+#             for pos in new_positions:
+#                 triggered_count += 1
+#                 pos_type_str = "BUY" if pos.type == mt5.POSITION_TYPE_BUY else "SELL"
+#                 cur_total_profit = account_equity_profit() - baseline_equity
+
+#                 printl(f"\n\n🔔 Trigger #{triggered_count} → ticket={pos.ticket}, type={pos_type_str}, "
+#                        f"vol={pos.volume}, open_price={getattr(pos, 'price_open', 'N/A')}")
+#                 printl(f"📊 Current Total Profit = {cur_total_profit:.2f} | 🎯 TP Target = {cumulative_tp:.2f}")
+
+#                 # Store this order
+#                 order_log.append({
+#                     "trigger_no": triggered_count,
+#                     "ticket": pos.ticket,
+#                     "type": pos_type_str,
+#                     "volume": pos.volume,
+#                     "profit": cur_total_profit,
+#                     "tp_target": cumulative_tp
+#                 })
+
+#                 # ✅ TP check
+#                 if cur_total_profit >= cumulative_tp:
+#                     last_trigger_info = {
+#                         "ticket": pos.ticket,
+#                         "type": pos_type_str,
+#                         "volume": pos.volume,
+#                         "open_price": getattr(pos, "price_open", None),
+#                         "account_balance": account_balance(),
+#                         "account_profit": account_equity_profit(),
+#                         "cumulative_tp_target": cumulative_tp
+#                     }
+#                     printl(f"🎯 TP Reached by Trigger #{triggered_count}! Profit={cur_total_profit:.2f} ≥ Target={cumulative_tp:.2f}")
+#                     close_all_positions()
+#                     return "profit"
+
+#                 # Increase TP and set up next order
+#                 next_vol = next(vol_gen)
+#                 prev_tp = cumulative_tp
+#                 cumulative_tp += next_vol * PROFIT_UNIT
+
+#                 if pos.type == mt5.POSITION_TYPE_BUY:
+#                     last_buy_price = pos.price_open
+#                     next_side = "SELL"
+#                     next_price = round(last_buy_price - gap, digits)
+#                 else:
+#                     next_side = "BUY"
+#                     last_buy_price = round(last_buy_price + gap, digits)
+#                     next_price = last_buy_price
+
+#                 printl(f"📈 Next {next_side} STOP placed at {next_price} (vol={next_vol}, new TP target={cumulative_tp:.2f})")
+#                 active_price = place_pending_stop(next_side, next_price, next_vol)
+#                 last_order_type = next_side
+
+#                 # ✅ Summary after each trigger
+#                 printl(f"📋 SUMMARY → Trigger #{triggered_count} | Type: {pos_type_str} | Vol: {pos.volume:.2f} | "
+#                        f"Profit: {cur_total_profit:.2f} | TP Target: {prev_tp:.2f} | Cumulative TP: {cumulative_tp:.2f}\n")
+
+#             last_pos_count = current_count
+#             last_positions = positions
+
+#         # --- Safety checks ---
+#         total_profit = acc_profit - baseline_equity
+#         if total_profit >= cumulative_tp:
+#             printl(f"\n🎯 Cumulative TP reached! Profit={total_profit:.2f} ≥ Target={cumulative_tp:.2f}")
+#             if not last_trigger_info:
+#                 last_trigger_info = {
+#                     "ticket": None,
+#                     "type": None,
+#                     "volume": None,
+#                     "open_price": None,
+#                     "account_balance": account_balance(),
+#                     "account_profit": account_equity_profit(),
+#                     "cumulative_tp_target": cumulative_tp
+#                 }
+#             close_all_positions()
+#             print_summary_table(summary_log)
+#             return "profit"
+
+#         if total_profit <= -LOSS_TARGET:
+#             printl(f"\n❌ SL hit! Profit={total_profit:.2f} ≤ -{LOSS_TARGET}")
+#             close_all_positions()
+#             print_summary_table(summary_log)
+#             return "loss"
+# def print_summary_table(summary_log):
+    print("\n\n __________________ ORDER SUMMARY __________________")
+    print("Trig | Ticket   | Type | Volume | Profit   | TP Target | Cum TP")
+    print("--------------------------------------------------------------")
+    for entry in summary_log:
+        print(f"{entry['trigger']:>4} | {entry['ticket']:<8} | {entry['type']:<4} | "
+              f"{entry['volume']:<6.2f} | {entry['profit']:+8.2f} | "
+              f"{entry['tp_target']:<9.2f} | {(entry['tp_target'] + PROFIT_UNIT):<8.2f}")
+    print("==============================================================\n")
 def run_cycle(vol_gen, gap):
     tick = mt5.symbol_info_tick(SYMBOL)
     if not tick:
@@ -250,19 +398,18 @@ def run_cycle(vol_gen, gap):
         return "error"
 
     last_buy_price = buy_price
-    last_order_type = "BUY"
     last_positions = mt5.positions_get(symbol=SYMBOL) or []
     last_pos_count = len(last_positions)
     baseline_equity = account_equity_profit()
     triggered_count = 0
-    last_trigger_info = None
+    summary_log = []  # store order details
 
     printl(f"📌 Baseline equity set at {baseline_equity:.2f}")
     printl(f"💰 Initial cumulative TP target = ${cumulative_tp:.2f}\n")
 
     # ---------------- MAIN LOOP ----------------
     while True:
-        time.sleep(1)  # refresh every second
+        time.sleep(1)
         ai = mt5.account_info()
         if ai:
             print(f"\r💵 Balance: {ai.balance:.2f} | 📊 Profit: {ai.profit:+.2f} | 🎯 TP Target: {cumulative_tp:.2f}", end="", flush=True)
@@ -270,56 +417,44 @@ def run_cycle(vol_gen, gap):
         acc_profit = account_equity_profit()
         positions = mt5.positions_get(symbol=SYMBOL) or []
 
-        # Wait for first trigger
         if not positions:
             continue
 
         current_count = len(positions)
         if current_count > last_pos_count:
-            # identify new positions compared to last snapshot
-            last_ticket_set = set([lp.ticket for lp in last_positions])
+            last_ticket_set = {lp.ticket for lp in last_positions}
             new_positions = [p for p in positions if p.ticket not in last_ticket_set]
+
             for pos in new_positions:
                 triggered_count += 1
-
-                # BEFORE increasing cumulative TP for next trades:
-                # check if this triggered position caused the cumulative TP to be reached
-                cur_total_profit = account_equity_profit() - baseline_equity
                 pos_type_str = "BUY" if pos.type == mt5.POSITION_TYPE_BUY else "SELL"
+                cur_total_profit = account_equity_profit() - baseline_equity
 
-                printl(f"\n\n🔔 Trigger #{triggered_count} → ticket={pos.ticket}, TP target = ${cumulative_tp:.2f}"
-                       f"type={pos_type_str}, vol={pos.volume}, open_price={getattr(pos, 'price_open', 'N/A')}")
-
-                # If profit already meets or exceeds the current cumulative_tp, mark this pos as the trigger and close.
-                if cur_total_profit >= cumulative_tp:
-                    last_trigger_info = {
-                        "ticket": pos.ticket,
-                        "type": pos_type_str,
-                        "volume": pos.volume,
-                        "open_price": getattr(pos, "price_open", None),
-                        "account_balance": account_balance(),
-                        "account_profit": account_equity_profit(),
-                        "cumulative_tp_target": cumulative_tp
-                    }
-                    printl(f"🎯 This position caused TP to be reached! Profit={cur_total_profit:.2f} ≥ Target={cumulative_tp:.2f}")
-                    printl(f"📌 Triggering position details: {last_trigger_info}")
-                    # Close all positions and exit reporting 'profit'
-                    close_all_positions()
-                    return "profit"
-
-                # if not reached yet, log and prepare next pending as before
-                order_log.append({
+                # Record order details
+                summary_log.append({
+                    "trigger": triggered_count,
                     "ticket": pos.ticket,
                     "type": pos_type_str,
                     "volume": pos.volume,
-                    "cumulative_tp": cumulative_tp
+                    "profit": cur_total_profit,
+                    "tp_target": cumulative_tp,
+                    "cum_tp": cumulative_tp + next(vol_gen) * PROFIT_UNIT  # next cumulative TP
                 })
 
-                # Get next volume and add to cumulative TP (target grows)
+                printl(f"\n🔔 Trigger #{triggered_count} → ticket={pos.ticket}, type={pos_type_str}, vol={pos.volume}, profit={cur_total_profit:.2f}")
+
+                # Check TP
+                if cur_total_profit >= cumulative_tp:
+                    printl(f"🎯 TP Reached by Trigger #{triggered_count}! Profit={cur_total_profit:.2f} ≥ Target={cumulative_tp:.2f}")
+                    close_all_positions()
+                    print_summary_table(summary_log)
+                    return "profit"
+
+                # Next trade setup
                 next_vol = next(vol_gen)
+                prev_tp = cumulative_tp
                 cumulative_tp += next_vol * PROFIT_UNIT
 
-                # Alternating GAP logic
                 if pos.type == mt5.POSITION_TYPE_BUY:
                     last_buy_price = pos.price_open
                     next_side = "SELL"
@@ -329,36 +464,39 @@ def run_cycle(vol_gen, gap):
                     last_buy_price = round(last_buy_price + gap, digits)
                     next_price = last_buy_price
 
-                printl(f"📈 Next {next_side} STOP placed at {next_price} (next vol={next_vol}, new TP target={cumulative_tp:.2f})")
-                active_price = place_pending_stop(next_side, next_price, next_vol)
-                last_order_type = next_side
+                printl(f"📈 Next {next_side} STOP placed at {next_price} (vol={next_vol}, new TP target={cumulative_tp:.2f})")
+                place_pending_stop(next_side, next_price, next_vol)
 
             last_pos_count = current_count
             last_positions = positions
 
-        # Periodic full TP/SL safety checks (in case TP achieved outside a trigger loop)
+        # Safety checks
         total_profit = acc_profit - baseline_equity
         if total_profit >= cumulative_tp:
-            printl(f"\n🎯 Cumulative TP reached on periodic check! Profit={total_profit:.2f} ≥ Target={cumulative_tp:.2f}")
-            # Optionally record last trigger as unknown if we didn't just process a new pos
-            if not last_trigger_info:
-                last_trigger_info = {
-                    "ticket": None,
-                    "type": None,
-                    "volume": None,
-                    "open_price": None,
-                    "account_balance": account_balance(),
-                    "account_profit": account_equity_profit(),
-                    "cumulative_tp_target": cumulative_tp
-                }
-                printl("📌 TP hit but trigger position not identified in loop (maybe was closed externally).")
-                printl(f"📌 Account state: {last_trigger_info}")
+            printl(f"\n🎯 Final Cumulative TP reached! Profit={total_profit:.2f} ≥ Target={cumulative_tp:.2f}")
             close_all_positions()
+            print_summary_table(summary_log)
             return "profit"
+
         if total_profit <= -LOSS_TARGET:
             printl(f"\n❌ SL hit! Profit={total_profit:.2f} ≤ -{LOSS_TARGET}")
             close_all_positions()
+            print_summary_table(summary_log)
             return "loss"
+
+
+# ================= SUMMARY TABLE ================= #
+def print_summary_table(summary_log):
+    print("\n\n📊 Trading Summary:")
+    print("Trig | Ticket   | Type | Volume | Profit   | TP Target | Cum TP")
+    print("-" * 62)
+
+    for s in summary_log:
+        print(f"{s['trigger']:<4} | {s['ticket']:<8} | {s['type']:<4} | "
+              f"{s['volume']:<6.2f} | {s['profit']:+7.2f} | {s['tp_target']:<9.2f} | {s['cum_tp']:<8.2f}")
+
+    print("-" * 62)
+    print(f"✅ Total Orders: {len(summary_log)}\n")
 
 # ------------------- Main ------------------- #
 def main():
