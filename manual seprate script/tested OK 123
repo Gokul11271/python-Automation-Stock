@@ -90,9 +90,6 @@ def volume_pattern_generator(start=0.01, step=0.01):
         vol += step 
 
 
-def account_balance():
-    ai = mt5.account_info()
-    return ai.balance if ai else 0.0
 # ------------------- Order Helpers ------------------- #
 def cancel_all_pending():
     orders = mt5.orders_get(symbol=SYMBOL)
@@ -116,144 +113,56 @@ def cancel_all_pending():
         printl(f"🗑️ Cleared {removed} pending orders.")
     return removed
 
-#     positions = mt5.positions_get(symbol=SYMBOL)
-#     if positions:
-#         for pos in positions:
-#             attempt = 0
-#             while True:
-#                 attempt += 1
-#                 if pos.type == mt5.POSITION_TYPE_BUY:
-#                     close_type = mt5.ORDER_TYPE_SELL
-#                     price = mt5.symbol_info_tick(SYMBOL).bid
-#                 else:
-#                     close_type = mt5.ORDER_TYPE_BUY
-#                     price = mt5.symbol_info_tick(SYMBOL).ask
-
-#                 request = {
-#                     "action": mt5.TRADE_ACTION_DEAL,
-#                     "symbol": SYMBOL,
-#                     "volume": pos.volume,
-#                     "type": close_type,
-#                     "position": pos.ticket,
-#                     "price": price,
-#                     "deviation": SLIPPAGE,
-#                     "magic": MAGIC,
-#                     "comment": "Close by script"
-#                 }
-#                 result = mt5.order_send(request)
-#                 if result and getattr(result, "retcode", None) == mt5.TRADE_RETCODE_DONE:
-#                     printl(f"✅ Closed position {pos.ticket} at {price} (attempts={attempt})")
-#                     break
-#                 else:
-#                     err = getattr(result, "retcode", mt5.last_error())
-#                     printl(f"⚠️ Failed to close position {pos.ticket} (retcode={err}), attempt={attempt}... retrying")
-#                     time.sleep(delay)
-#                 if max_attempts > 0 and attempt >= max_attempts:
-#                     printl(f"❌ Max attempts reached while closing {pos.ticket}")
-#                     break
-
-#     cancel_all_pending()
-#     printl("✅ All positions and pending orders closed.")
-#     play_mp3_repeat(r"C:\Users\hp\Downloads\cash-register-purchase-87313.mp3", repeat=2, label="💰 Profit Sound")
-
-
-#     if order_log:
-#         print("\n📊 Trading Summary:")
-#         print(f"{'Ticket':<10} {'Type':<6} {'Volume':<8} {'Cumulative TP':<12} {'TP':<10} {'Final Closed TP':<15}")
-#         print("-" * 50)
-#         for entry in order_log:
-#             print(f"{entry['ticket']:<10} {entry['type']:<6} {entry['volume']:<8} {entry['cumulative_tp']:<12}")
-#         print("-" * 50)
-#         print(f"✅ Total Orders: {len(order_log)}\n")
-# --- improved close all positions ---
-def close_all_positions(max_attempts_per_pos=5, delay=1.0):
-    """
-    Cancels pending orders first, then closes all open positions for SYMBOL.
-    Retries each close up to max_attempts_per_pos times and refreshes positions
-    between attempts to avoid stale tickets/volumes.
-    """
-    # 1) Cancel pending orders first to prevent re-opening while we close
-    removed = cancel_all_pending()
-    if removed:
-        printl(f"🗑️ Removed {removed} pending orders before closing positions.")
-
-    attempt_global = 0
-    while True:
-        positions = mt5.positions_get(symbol=SYMBOL)
-        if not positions or len(positions) == 0:
-            printl("✅ No open positions remain.")
-            break
-
-        # iterate current snapshot of positions and try to close each
+def close_all_positions(max_attempts=0, delay=1.0):
+    positions = mt5.positions_get(symbol=SYMBOL)
+    if positions:
         for pos in positions:
             attempt = 0
-            # always re-query latest tick/price for each attempt
             while True:
                 attempt += 1
-                tick = mt5.symbol_info_tick(SYMBOL)
-                if not tick:
-                    printl("⚠️ No tick available while closing. Retrying...")
-                    time.sleep(delay)
-                    continue
-
                 if pos.type == mt5.POSITION_TYPE_BUY:
                     close_type = mt5.ORDER_TYPE_SELL
-                    price = tick.bid
+                    price = mt5.symbol_info_tick(SYMBOL).bid
                 else:
                     close_type = mt5.ORDER_TYPE_BUY
-                    price = tick.ask
-
-                # use exact pos.volume (no normalization) to close entire position
-                vol_to_close = float(pos.volume)
+                    price = mt5.symbol_info_tick(SYMBOL).ask
 
                 request = {
                     "action": mt5.TRADE_ACTION_DEAL,
                     "symbol": SYMBOL,
-                    "volume": vol_to_close,
+                    "volume": pos.volume,
                     "type": close_type,
-                    "position": int(pos.ticket),
-                    "price": round(price, digits),
+                    "position": pos.ticket,
+                    "price": price,
                     "deviation": SLIPPAGE,
                     "magic": MAGIC,
-                    "comment": "Close by script",
-                    "type_filling": mt5.ORDER_FILLING_IOC,  # allow partial fills if necessary
+                    "comment": "Close by script"
                 }
-
                 result = mt5.order_send(request)
-                # result might be None or an object/dict; check retcode robustly
-                retcode = getattr(result, "retcode", None) if result is not None else None
-                if result is not None and (retcode == mt5.TRADE_RETCODE_DONE or retcode == 10009):
-                    # 10009 sometimes used for successful trade depending on build (keep check)
-                    printl(f"✅ Closed position {pos.ticket} vol={vol_to_close} price={price} (attempts={attempt})")
+                if result and getattr(result, "retcode", None) == mt5.TRADE_RETCODE_DONE:
+                    printl(f"✅ Closed position {pos.ticket} at {price} (attempts={attempt})")
                     break
                 else:
-                    # try to extract useful message
-                    err = getattr(result, "comment", None) or getattr(result, "retcode", None) or mt5.last_error()
-                    printl(f"⚠️ Failed to close {pos.ticket} (retcode={err}), attempt={attempt}...")
-
-                if attempt >= max_attempts_per_pos:
-                    printl(f"❌ Reached max attempts for pos {pos.ticket}. Moving on.")
+                    err = getattr(result, "retcode", mt5.last_error())
+                    printl(f"⚠️ Failed to close position {pos.ticket} (retcode={err}), attempt={attempt}... retrying")
+                    time.sleep(delay)
+                if max_attempts > 0 and attempt >= max_attempts:
+                    printl(f"❌ Max attempts reached while closing {pos.ticket}")
                     break
 
-                time.sleep(delay)
+    cancel_all_pending()
+    printl("✅ All positions and pending orders closed.")
+    play_mp3_repeat(r"C:\Users\hp\Downloads\cash-register-purchase-87313.mp3", repeat=2, label="💰 Profit Sound")
 
-        # safety: cancel any pending left (they could be placed while we closed)
-        cancel_all_pending()
+    if order_log:
+        print("\n📊 Trading Summary:")
+        print(f"{'Ticket':<10} {'Type':<6} {'Volume':<8} {'Cumulative TP':<12}")
+        print("-" * 50)
+        for entry in order_log:
+            print(f"{entry['ticket']:<10} {entry['type']:<6} {entry['volume']:<8} {entry['cumulative_tp']:<12}")
+        print("-" * 50)
+        print(f"✅ Total Orders: {len(order_log)}\n")
 
-        attempt_global += 1
-        if attempt_global > 10:  # safety bail-out to avoid infinite loop
-            printl("❌ Too many global attempts while closing positions. Exiting close loop.")
-            break
-
-        # small delay and loop again to check if any positions remain
-        time.sleep(0.5)
-
-    # final summary
-    remaining = mt5.positions_get(symbol=SYMBOL)
-    if remaining and len(remaining) > 0:
-        printl(f"⚠️ Could not close {len(remaining)} positions. See logs above.")
-    else:
-        printl("✅ All positions and pendings handled (if possible).")
 def account_equity_profit():
     ai = mt5.account_info()
     if ai:
@@ -505,102 +414,6 @@ def place_pending_stop(order_side: str, base_price: float, volume: float, max_at
 #             printl(f"\n❌ SL hit! Profit={total_profit:.2f} ≤ -{LOSS_TARGET}")
 #             close_all_positions()
 #             return "loss"
-# def run_cycle(vol_gen, gap):
-#     tick = mt5.symbol_info_tick(SYMBOL)
-#     if not tick:
-#         printl("❌ No tick data available. Cannot run cycle.")
-#         return "error"
-
-#     base_ask = tick.ask
-#     options = [round(base_ask + i * point * 10, digits) for i in range(1, 4)]
-#     print("\n👉 Choose starting BUY STOP price:")
-#     for i, val in enumerate(options, 1):
-#         print(f"{i}. {val}")
-#     choice = input("Enter choice (1/2/3 or custom price): ").strip()
-
-#     if choice in ["1", "2", "3"]:
-#         buy_price = options[int(choice) - 1]
-#     else:
-#         try:
-#             buy_price = float(choice)
-#         except ValueError:
-#             printl("Invalid price entered. Aborting cycle.")
-#             return "error"
-
-#     # Start with first BUY order and formula-based TP
-#     first_vol = next(vol_gen)
-#     cumulative_tp = first_vol * PROFIT_UNIT
-#     active_price = place_pending_stop("BUY", buy_price, first_vol)
-#     if not active_price:
-#         return "error"
-
-#     last_buy_price = buy_price
-#     last_order_type = "BUY"
-#     last_positions = mt5.positions_get(symbol=SYMBOL) or []
-#     last_pos_count = len(last_positions)
-#     baseline_equity = account_equity_profit()
-#     triggered_count = 0
-
-#     printl(f"📌 Baseline equity set at {baseline_equity:.2f}")
-
-#     while True:
-#         time.sleep(0.2)
-#         acc_profit = account_equity_profit()
-#         positions = mt5.positions_get(symbol=SYMBOL) or []
-
-#         if not positions:
-#             print("⏳ Waiting for first trade to trigger...", end="\r")
-#             continue
-
-#         current_count = len(positions)
-#         if current_count > last_pos_count:
-#             new_positions = [p for p in positions if p.ticket not in [lp.ticket for lp in last_positions]]
-#             for pos in new_positions:
-#                 triggered_count += 1
-
-#                 # Log order info
-#                 order_log.append({
-#                     "ticket": pos.ticket,
-#                     "type": "BUY" if pos.type == mt5.POSITION_TYPE_BUY else "SELL",
-#                     "volume": pos.volume,
-#                     "cumulative_tp": cumulative_tp
-#                 })
-
-#                 printl(f"\n🔔 Trigger #{triggered_count} → ticket={pos.ticket}, "
-#                        f"type={'BUY' if pos.type == mt5.POSITION_TYPE_BUY else 'SELL'}, "
-#                        f"vol={pos.volume}, cumulative TP=${cumulative_tp}")
-
-#                 # Get next volume and TP target
-#                 next_vol = next(vol_gen)
-#                 cumulative_tp += next_vol * PROFIT_UNIT
-
-#                 # Alternating pattern logic
-#                 if pos.type == mt5.POSITION_TYPE_BUY:
-#                     last_buy_price = pos.price_open
-#                     next_side = "SELL"
-#                     next_price = round(last_buy_price - gap, digits)
-#                 else:
-#                     next_side = "BUY"
-#                     last_buy_price = round(last_buy_price + gap, digits)
-#                     next_price = last_buy_price
-
-#                 printl(f"📈 Next {next_side} STOP placed at {next_price}")
-#                 active_price = place_pending_stop(next_side, next_price, next_vol)
-#                 last_order_type = next_side
-
-#             last_pos_count = current_count
-#             last_positions = positions
-
-#         # Check if TP or SL reached
-#         total_profit = acc_profit - baseline_equity
-#         if total_profit >= cumulative_tp:
-#             printl(f"\n🎯 Cumulative TP reached! Profit={total_profit:.2f} ≥ Target={cumulative_tp:.2f}")
-#             close_all_positions()
-#             return "profit"
-#         if total_profit <= -LOSS_TARGET:
-#             printl(f"\n❌ SL hit! Profit={total_profit:.2f} ≤ -{LOSS_TARGET}")
-#             close_all_positions()
-#             return "loss"
 def run_cycle(vol_gen, gap):
     tick = mt5.symbol_info_tick(SYMBOL)
     if not tick:
@@ -623,6 +436,7 @@ def run_cycle(vol_gen, gap):
             printl("Invalid price entered. Aborting cycle.")
             return "error"
 
+    # Start with first BUY order and formula-based TP
     first_vol = next(vol_gen)
     cumulative_tp = first_vol * PROFIT_UNIT
     active_price = place_pending_stop("BUY", buy_price, first_vol)
@@ -637,20 +451,14 @@ def run_cycle(vol_gen, gap):
     triggered_count = 0
 
     printl(f"📌 Baseline equity set at {baseline_equity:.2f}")
-    printl(f"💰 Initial cumulative TP target = ${cumulative_tp:.2f}\n")
 
-    # ---------------- MAIN LOOP ----------------
     while True:
-        time.sleep(1)  # refresh every second
-        ai = mt5.account_info()
-        if ai:
-            print(f"\r💵 Balance: {ai.balance:.2f} | 📊 Profit: {ai.profit:+.2f} | 🎯 TP Target: {cumulative_tp:.2f}", end="", flush=True)
-
+        time.sleep(0.2)
         acc_profit = account_equity_profit()
         positions = mt5.positions_get(symbol=SYMBOL) or []
 
-        # Wait for first trigger
         if not positions:
+            print("⏳ Waiting for first trade to trigger...", end="\r")
             continue
 
         current_count = len(positions)
@@ -659,6 +467,7 @@ def run_cycle(vol_gen, gap):
             for pos in new_positions:
                 triggered_count += 1
 
+                # Log order info
                 order_log.append({
                     "ticket": pos.ticket,
                     "type": "BUY" if pos.type == mt5.POSITION_TYPE_BUY else "SELL",
@@ -666,14 +475,15 @@ def run_cycle(vol_gen, gap):
                     "cumulative_tp": cumulative_tp
                 })
 
-                printl(f"\n\n🔔 Trigger #{triggered_count} → ticket={pos.ticket}, "
+                printl(f"\n🔔 Trigger #{triggered_count} → ticket={pos.ticket}, "
                        f"type={'BUY' if pos.type == mt5.POSITION_TYPE_BUY else 'SELL'}, "
-                       f"vol={pos.volume}, cumulative TP=${cumulative_tp:.2f}")
+                       f"vol={pos.volume}, cumulative TP=${cumulative_tp}")
 
+                # Get next volume and TP target
                 next_vol = next(vol_gen)
                 cumulative_tp += next_vol * PROFIT_UNIT
 
-                # Alternating GAP logic
+                # Alternating pattern logic
                 if pos.type == mt5.POSITION_TYPE_BUY:
                     last_buy_price = pos.price_open
                     next_side = "SELL"
@@ -690,7 +500,7 @@ def run_cycle(vol_gen, gap):
             last_pos_count = current_count
             last_positions = positions
 
-        # Live TP check
+        # Check if TP or SL reached
         total_profit = acc_profit - baseline_equity
         if total_profit >= cumulative_tp:
             printl(f"\n🎯 Cumulative TP reached! Profit={total_profit:.2f} ≥ Target={cumulative_tp:.2f}")
