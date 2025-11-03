@@ -26,6 +26,9 @@ else:
     print(f"Margin Level  : {account_info.margin_level}")
     print(f"Currency      : {account_info.currency}")
     print(f"Leverage      : {account_info.leverage}")
+    simulated_balance = account_info.balance + 1000  # Add hypothetical profit
+print(f"Simulated Balance: {simulated_balance}")
+
 
 # Shutdown connection
 mt5.shutdown()
