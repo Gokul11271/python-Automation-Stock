@@ -1,11 +1,15 @@
-
 """
-Cyclic BUY/SELL STOP script for MetaTrader5 with cumulative TP.
+Automated Cyclic BUY/SELL STOP script for MetaTrader5 — Option C (infinite decreasing SELLs),
+with Option A pattern output (decrease SELL by integer SELL_GAP each cycle).
 
-- Retries failed orders until success
-- Prints how many attempts were made
-- Cumulative profit (TP) linked to all triggered orders
-- Closes all positions when cumulative TP or SL is reached
+Behavior:
+- AUTO first BUY STOP (adjusted to broker min distance)
+- base_buy_price locked to the actually placed BUY STOP
+- SELL STOPs placed so integer part = int(base_buy_price) - SELL_GAP * n (n increases each SELL)
+- Decimal part is preserved from the base_buy_price fractional part (so integer pattern stays)
+- If desired SELL is too close and would be rejected, the script decreases it further so it can be placed
+- No user input required
+- Cumulative TP & SL preserved
 """
 
 import MetaTrader5 as mt5
@@ -14,14 +18,21 @@ from datetime import datetime
 import pygame
 
 # ------------------- Config ------------------- #
-SYMBOL = "XAUUSD_"    # trading symbol
+SYMBOL = "XAUUSD_"    # trading symbol (must match your MT5 symbol name)
 SLIPPAGE = 500
 MAGIC = 12345
 LOSS_TARGET = 500.0       # equity loss stop (in $)
-PROFIT_UNIT = 50         # profit per volume unit for TP calculation
+PROFIT_UNIT = 600          # profit per volume unit for TP calculation
+
+# ---------------- SELL GAP (Option 1: integer steps) ---------------- #
+SELL_GAP = 1              # integer gap (1 => pattern: 4054 -> 4053 -> 4052 ...)
+# ------------------------------------------------------------------- #
 
 # ------------------- Globals ------------------- #
-order_log = []  # stores history of triggered trades
+order_log = []            # stores history of triggered trades (includes pattern_price)
+base_buy_price = None     # will be set to the actual placed BUY STOP price (float with decimals)
+sell_step = 1             # SELL #1 -> step=1 (pattern subtracts SELL_GAP*1), increments after placing SELL
+sell_next_price = None    # for visibility/debug
 
 # ------------------- MT5 Init ------------------- #
 if not mt5.initialize():
@@ -45,7 +56,7 @@ point = symbol_info.point
 stop_level = symbol_info.trade_stops_level * point if symbol_info.trade_stops_level is not None else 0
 digits = symbol_info.digits
 
-# Volume limits
+# Volume limits (fallbacks)
 vol_min = symbol_info.volume_min or 0.01
 vol_step = symbol_info.volume_step or 0.01
 vol_max = symbol_info.volume_max or 100.0
@@ -65,25 +76,27 @@ def normalize_volume(vol: float) -> float:
 def printl(*args, **kwargs):
     print(f"[{now()}]", *args, **kwargs)
 
-# ------------------- sound Generator (hardcoded) ------------------- #
+# ------------------- sound Generator ------------------- #
 def play_mp3_repeat(file_path, repeat=2, gap=0.1, label="🔊 Custom Sound"):
-    print(f"{label} (×{repeat})")
-    pygame.mixer.init()
-    pygame.mixer.music.load(file_path)
-    for _ in range(repeat):
-        pygame.mixer.music.play()
-        while pygame.mixer.music.get_busy():
-            time.sleep(0.1)
-        time.sleep(gap)
+    try:
+        print(f"{label} (×{repeat})")
+        pygame.mixer.init()
+        pygame.mixer.music.load(file_path)
+        for _ in range(repeat):
+            pygame.mixer.music.play()
+            while pygame.mixer.music.get_busy():
+                time.sleep(0.1)
+            time.sleep(gap)
+    except Exception as e:
+        printl("⚠️ Sound playback failed:", e)
 
-# ------------------- Volume Generator (hardcoded) ------------------- #
+# ------------------- Volume Generator ------------------- #
 def volume_pattern_generator():
-    pattern = [0.01, 0.02, 0.03, 0.04]
+    pattern = [0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.10]
     for vol in pattern:
         yield vol
     while True:
-        yield 0.04  # continue with 0.04 for all remaining orders
-
+        yield 0.10
 
 def account_balance():
     ai = mt5.account_info()
@@ -92,7 +105,6 @@ def account_balance():
 def account_equity_profit():
     ai = mt5.account_info()
     if ai:
-        # return profit as reported by MT5 (floating/unrealized)
         return ai.profit
     return 0.0
 
@@ -160,23 +172,27 @@ def close_all_positions(max_attempts=0, delay=1.0):
     printl("✅ All positions and pending orders closed.")
     play_mp3_repeat(r"C:\Users\hp\Downloads\cash-register-purchase-87313.mp3", repeat=2, label="💰 Profit Sound")
 
-
+    # Print trading summary showing pattern_price (integer) and actuals
     if order_log:
-        print("\n📊 Trading Summary:")
-        print(f"{'Ticket':<10} {'Type':<6} {'Volume':<8} {'Cumulative TP':<12}")
-        print("-" * 50)
-        for entry in order_log:
-            print(f"{entry['ticket']:<10} {entry['type']:<6} {entry['volume']:<8} {entry['cumulative_tp']:<12}")
-        print("-" * 50)
+        print("\n📊 Trading Summary (pattern price shown as integer):")
+        print(f"{'Order':<6} {'Ticket':<10} {'Type':<6} {'Volume':<8} {'Pattern':<8} {'ActualClose':<12}")
+        print("-" * 70)
+        for i, entry in enumerate(order_log, 1):
+            ticket = entry.get("ticket", "")
+            typ = entry.get("type", "")
+            vol = entry.get("volume", "")
+            patt = entry.get("pattern_price", "")
+            actual_close = entry.get("actual_close", "")
+            print(f"{i:<6} {ticket:<10} {typ:<6} {vol:<8} {patt:<8} {actual_close:<12}")
+        print("-" * 70)
         print(f"✅ Total Orders: {len(order_log)}\n")
 
-def account_equity_profit():
-    ai = mt5.account_info()
-    if ai:
-        return ai.profit
-    return 0.0
-
 def place_pending_stop(order_side: str, base_price: float, volume: float, max_attempts=0, delay=1.0):
+    """
+    Places a pending BUY_STOP or SELL_STOP at base_price, but enforces broker stop_level
+    and retries until success (or until max_attempts > 0 is reached).
+    Returns placed price (rounded) or None on failure.
+    """
     cancel_all_pending()
     volume = normalize_volume(volume)
     tick = mt5.symbol_info_tick(SYMBOL)
@@ -222,36 +238,32 @@ def place_pending_stop(order_side: str, base_price: float, volume: float, max_at
             printl(f"❌ Max attempts reached ({max_attempts}). Could not place {order_side} STOP.")
             return None
 
-# ------------------- Trading Cycle ------------------- #
-def run_cycle(vol_gen, gap):
+# ------------------- Trading Cycle (Option C with Option A pattern output) ------------------- #
+def run_cycle(vol_gen):
+    global base_buy_price, sell_step, sell_next_price
+
     tick = mt5.symbol_info_tick(SYMBOL)
     if not tick:
         printl("❌ No tick data available. Cannot run cycle.")
         return "error"
 
     base_ask = tick.ask
-    options = [round(base_ask + i * point * 10, digits) for i in range(1, 4)]
-    print("\n👉 Choose starting BUY STOP price:")
-    for i, val in enumerate(options, 1):
-        print(f"{i}. {val}")
-    choice = input("Enter choice (1/2/3 or custom price): ").strip()
 
-    if choice in ["1", "2", "3"]:
-        buy_price = options[int(choice) - 1]
-    else:
-        try:
-            buy_price = float(choice)
-        except ValueError:
-            printl("Invalid price entered. Aborting cycle.")
-            return "error"
+    # AUTO MODE: pick initial BUY STOP as ASK adjusted by broker stop distance
+    min_buy_stop = base_ask + stop_level + (2 * point)
+    buy_price = round(min_buy_stop, digits)
 
     first_vol = next(vol_gen)
     cumulative_tp = first_vol * PROFIT_UNIT
+
+    printl(f"🟢 Auto BUY STOP selected & adjusted to {buy_price} (market ask={base_ask})")
     active_price = place_pending_stop("BUY", buy_price, first_vol)
     if not active_price:
         return "error"
 
-    last_buy_price = buy_price
+    # lock base_buy_price to the actually placed BUY STOP price (float with decimals)
+    base_buy_price = active_price
+    last_buy_price = base_buy_price
     last_order_type = "BUY"
     last_positions = mt5.positions_get(symbol=SYMBOL) or []
     last_pos_count = len(last_positions)
@@ -264,7 +276,8 @@ def run_cycle(vol_gen, gap):
 
     # ---------------- MAIN LOOP ----------------
     while True:
-        time.sleep(1)  # refresh every second
+        # time.sleep(1)
+
         ai = mt5.account_info()
         if ai:
             print(f"\r💵 Balance: {ai.balance:.2f} | 📊 Profit: {ai.profit:+.2f} | 🎯 TP Target: {cumulative_tp:.2f}", end="", flush=True)
@@ -284,65 +297,110 @@ def run_cycle(vol_gen, gap):
             for pos in new_positions:
                 triggered_count += 1
 
-                # BEFORE increasing cumulative TP for next trades:
-                # check if this triggered position caused the cumulative TP to be reached
                 cur_total_profit = account_equity_profit() - baseline_equity
                 pos_type_str = "BUY" if pos.type == mt5.POSITION_TYPE_BUY else "SELL"
 
-                printl(f"\n\n🔔 Trigger #{triggered_count} → ticket={pos.ticket}, TP target = ${cumulative_tp:.2f}"
-                       f"type={pos_type_str}, vol={pos.volume}, open_price={getattr(pos, 'price_open', 'N/A')}")
+                actual_open = getattr(pos, "price_open", "N/A")
+                printl(f"\n\n🔔 Trigger #{triggered_count} → ticket={pos.ticket}, "
+                       f"type={pos_type_str}, vol={pos.volume}, open_price={actual_open}")
 
-                # If profit already meets or exceeds the current cumulative_tp, mark this pos as the trigger and close.
+                # If cumulative TP reached, close and exit
                 if cur_total_profit >= cumulative_tp:
                     last_trigger_info = {
                         "ticket": pos.ticket,
                         "type": pos_type_str,
                         "volume": pos.volume,
-                        "open_price": getattr(pos, "price_open", None),
+                        "open_price": actual_open,
                         "account_balance": account_balance(),
                         "account_profit": account_equity_profit(),
                         "cumulative_tp_target": cumulative_tp
-                    }
+                        }
                     printl(f"🎯 This position caused TP to be reached! Profit={cur_total_profit:.2f} ≥ Target={cumulative_tp:.2f}")
                     printl(f"📌 Triggering position details: {last_trigger_info}")
-                    # Close all positions and exit reporting 'profit'
                     close_all_positions()
                     return "profit"
 
-                # if not reached yet, log and prepare next pending as before
+                # Prepare pattern_price for logging (integer part pattern)
+                # If BUY triggered: pattern_price = int(base_buy_price)
+                # If SELL triggered: pattern_price = int(base_buy_price) - SELL_GAP * (sell_step - 1)
+                if pos.type == mt5.POSITION_TYPE_BUY:
+                    pattern_price_display = int(base_buy_price)
+                else:
+                    # For a SELL that just triggered, the step used was (sell_step - 1)
+                    pattern_price_display = int(base_buy_price) - SELL_GAP * (sell_step - 1)
+
+                # store actual close if available (we'll store open price now; actual close recorded in summary when closing)
                 order_log.append({
                     "ticket": pos.ticket,
                     "type": pos_type_str,
                     "volume": pos.volume,
-                    "cumulative_tp": cumulative_tp
+                    "cumulative_tp": cumulative_tp,
+                    "pattern_price": pattern_price_display,
+                    "actual_close": getattr(pos, "price_open", "")  # placeholder; close_all_positions will not update per-order close price
                 })
 
-                # Get next volume and add to cumulative TP (target grows)
+                # update cumulative TP target with next volume
                 next_vol = next(vol_gen)
                 cumulative_tp += next_vol * PROFIT_UNIT
 
-                # Alternating GAP logic
+                # ------------------ Corrected Pattern Logic (placement using integer SELL_GAP) ------------------
+                # BUY is fixed at base_buy_price (locked to the first placed BUY)
+                # SELL placement computes integer pattern target and attaches fractional part of base_buy_price
                 if pos.type == mt5.POSITION_TYPE_BUY:
-                    last_buy_price = pos.price_open
-                    next_side = "SELL"
-                    next_price = round(last_buy_price - gap, digits)
-                else:
-                    next_side = "BUY"
-                    last_buy_price = round(last_buy_price + gap, digits)
-                    next_price = last_buy_price
+                    # fractional part of base_buy_price preserved for decimal
+                    frac = base_buy_price - int(base_buy_price)
 
-                printl(f"📈 Next {next_side} STOP placed at {next_price} (next vol={next_vol}, new TP target={cumulative_tp:.2f})")
+                    # compute pattern integer for this sell placement: int(base) - SELL_GAP * sell_step
+                    pattern_integer = int(base_buy_price) - SELL_GAP * sell_step
+
+                    # desired decimal sell = pattern_integer + frac
+                    desired_sell = pattern_integer + frac
+
+                    # check current tick to ensure SELL stop is valid (must be sufficiently below market)
+                    tick_now = mt5.symbol_info_tick(SYMBOL)
+                    if not tick_now:
+                        printl("❌ No tick available while computing SELL price.")
+                        return "error"
+
+                    # broker maximum allowed SELL price (anything higher / closer than this will be rejected)
+                    max_allowed_sell = tick_now.bid - stop_level - (2 * point)
+
+                    # If desired_sell is TOO CLOSE (i.e., desired_sell > max_allowed_sell), push it further down
+                    if desired_sell > max_allowed_sell:
+                        # we need to push desired_sell down so it's <= max_allowed_sell - 1*point
+                        # compute difference in points; convert to decimal shift by point
+                        # set desired_sell to max_allowed_sell - 1*point (keep fractional part as much as possible)
+                        desired_sell = max_allowed_sell - (1 * point)
+
+                    # set the next SELL price (decimal) for placement
+                    next_side = "SELL"
+                    next_price = round(desired_sell, digits)
+                    sell_next_price = next_price  # for debug/visibility
+
+                    # increment step so next SELL will be further down (pattern integer also uses this)
+                    sell_step += 1
+
+                else:
+                    # SELL triggered -> always place BUY at fixed base price (decimal)
+                    next_side = "BUY"
+                    next_price = round(base_buy_price, digits)
+
+                # ------------------------------------------------------------
+
+                # For logging: compute the pattern_price that will be used for the *next* placed order
+                # but we already appended the current entry's pattern above.
+                printl(f"📈 Next {next_side} STOP at {next_price} | vol={next_vol} | New TP={cumulative_tp:.2f}")
+
                 active_price = place_pending_stop(next_side, next_price, next_vol)
                 last_order_type = next_side
 
             last_pos_count = current_count
             last_positions = positions
 
-        # Periodic full TP/SL safety checks (in case TP achieved outside a trigger loop)
+        # Periodic full TP/SL safety checks
         total_profit = acc_profit - baseline_equity
         if total_profit >= cumulative_tp:
             printl(f"\n🎯 Cumulative TP reached on periodic check! Profit={total_profit:.2f} ≥ Target={cumulative_tp:.2f}")
-            # Optionally record last trigger as unknown if we didn't just process a new pos
             if not last_trigger_info:
                 last_trigger_info = {
                     "ticket": None,
@@ -366,13 +424,8 @@ def run_cycle(vol_gen, gap):
 def main():
     try:
         vol_gen = volume_pattern_generator()
-        gap = None
-        while gap is None:
-            try:
-                gap = float(input("Enter gap (distance between BUY and SELL in price units): ").strip())
-            except ValueError:
-                printl("Please input a numeric gap value.")
-        run_cycle(vol_gen, gap)
+        printl("🚀 Starting automated cycle (Option C) — using live market price for initial BUY.")
+        run_cycle(vol_gen)
     except KeyboardInterrupt:
         printl("🛑 Script stopped by user.")
     finally:

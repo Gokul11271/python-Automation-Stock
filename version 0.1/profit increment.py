@@ -4,7 +4,7 @@ from datetime import datetime
 import winsound   # for sound alerts (Windows only)
 
 # ------------------- Config ------------------- #
-SYMBOL = "XAUUSD_"       # Trading symbol
+SYMBOL = "XAUUSD"       # Trading symbol
 SLIPPAGE = 500
 MAGIC = 12345
 LOSS_TARGET = 50.0       # Default loss stop in $

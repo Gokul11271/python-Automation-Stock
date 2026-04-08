@@ -13,7 +13,7 @@ import time
 from datetime import datetime
 
 # ------------------- Config ------------------- #
-SYMBOL = "XAUUSD_"    # trading symbol (set to your broker's symbol name)
+SYMBOL = "XAUUSD"    # trading symbol (set to your broker's symbol name)
 SLIPPAGE = 500           # allowed deviation in points
 MAGIC = 12345            # magic number
 LOSS_TARGET = 50.0       # equity loss stop (in $)
