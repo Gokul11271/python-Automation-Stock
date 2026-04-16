@@ -14,11 +14,11 @@ from datetime import datetime
 import pygame
 
 # ------------------- Config ------------------- #
-SYMBOL = "XAUUSD_"    # trading symbol
+SYMBOL = "XAUUSD"    # trading symbol
 SLIPPAGE = 500
 MAGIC = 12345
-LOSS_TARGET = 500.0       # equity loss stop (in $)
-PROFIT_UNIT = 50000          # profit per volume unit for TP calculation
+LOSS_TARGET = 5.0       # equity loss stop (in $)
+PROFIT_UNIT = 5.0          # profit per volume unit for TP calculation
 
 # ------------------- Globals ------------------- #
 order_log = []  # stores history of triggered trades

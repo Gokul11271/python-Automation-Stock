@@ -14,7 +14,7 @@ from datetime import datetime
 import pygame
 
 # ------------------- Config ------------------- #
-SYMBOL = "XAUUSD_"    # trading symbol
+SYMBOL = "XAUUSD"    # trading symbol
 SLIPPAGE = 500
 MAGIC = 12345
 LOSS_TARGET = 500.0       # equity loss stop (in $)
