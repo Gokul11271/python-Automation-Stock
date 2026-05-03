@@ -1,12 +1,14 @@
 import MetaTrader5 as mt5
 import time
+from datetime import datetime
 
 # -------- CONFIG -------- #
 SYMBOL = "XAUUSD"
-LOT = 0.01
-GAP = 1.0
-MAGIC = 2002
-SLIPPAGE = 10
+MAGIC = 3003
+SLIPPAGE = 100
+PROFIT_UNIT = 3      # ✅ FIXED PROFIT TARGET
+LOSS_TARGET = 1000
+MAX_RETRIES = 3
 
 # -------- INIT -------- #
 if not mt5.initialize():
@@ -15,79 +17,206 @@ if not mt5.initialize():
 
 mt5.symbol_select(SYMBOL, True)
 
+
 # -------- HELPERS -------- #
-def get_tick():
-    return mt5.symbol_info_tick(SYMBOL)
+def now():
+    return datetime.now().strftime("%H:%M:%S")
 
-def place_market(order_type):
-    tick = get_tick()
-    price = tick.ask if order_type == "BUY" else tick.bid
+def log(*msg):
+    print(f"[{now()}]", *msg)
 
-    request = {
+
+# -------- VOLUME PATTERN -------- #
+def volume_generator():
+    pattern = [0.01,0.02,0.03,0.04,0.05,0.06,0.07,0.08,0.09,0.10]
+    for v in pattern:
+        yield v
+    while True:
+        yield 0.10
+
+
+# -------- STRONG ORDER SEND -------- #
+def send_order(req):
+    for fill in [mt5.ORDER_FILLING_RETURN, mt5.ORDER_FILLING_IOC, mt5.ORDER_FILLING_FOK]:
+        req["type_filling"] = fill
+
+        for attempt in range(1, MAX_RETRIES + 1):
+
+            result = mt5.order_send(req)
+
+            if result is None:
+                log(f"❌ No response (attempt {attempt})")
+                time.sleep(0.3)
+                continue
+
+            if result.retcode == mt5.TRADE_RETCODE_DONE:
+                return True
+
+            if result.retcode == 10030:
+                log(f"⚠️ Filling {fill} not supported")
+                break
+
+            log(f"❌ Failed retcode={result.retcode}")
+            log(f"   reason: {result.comment}")
+            time.sleep(0.3)
+
+    log("🚨 Order failed completely")
+    return False
+
+
+# -------- MARKET ORDER -------- #
+def market_order(side, volume):
+    tick = mt5.symbol_info_tick(SYMBOL)
+    price = tick.ask if side == "BUY" else tick.bid
+
+    req = {
         "action": mt5.TRADE_ACTION_DEAL,
         "symbol": SYMBOL,
-        "volume": LOT,
-        "type": mt5.ORDER_TYPE_BUY if order_type == "BUY" else mt5.ORDER_TYPE_SELL,
+        "volume": volume,
+        "type": mt5.ORDER_TYPE_BUY if side == "BUY" else mt5.ORDER_TYPE_SELL,
         "price": price,
         "deviation": SLIPPAGE,
-        "magic": MAGIC,
-        "comment": "Initial Market"
+        "magic": MAGIC
     }
 
-    mt5.order_send(request)
-    print(f"✅ MARKET {order_type} @ {price}")
-    return price
+    if send_order(req):
+        log(f"✅ MARKET {side} {volume} @ {price}")
+        return price
 
-def place_pending(order_type, price):
-    request = {
+    log("❌ MARKET FAILED")
+    return None
+
+
+# -------- CANCEL PENDING -------- #
+def cancel_pending():
+    orders = mt5.orders_get(symbol=SYMBOL)
+    if orders:
+        for o in orders:
+            mt5.order_send({
+                "action": mt5.TRADE_ACTION_REMOVE,
+                "order": o.ticket
+            })
+
+
+# -------- PLACE STOP -------- #
+def place_stop(side, price, volume):
+    cancel_pending()
+
+    tick = mt5.symbol_info_tick(SYMBOL)
+
+    if side == "BUY":
+        if tick.ask >= price:
+            return market_order("BUY", volume)
+        order_type = mt5.ORDER_TYPE_BUY_STOP
+    else:
+        if tick.bid <= price:
+            return market_order("SELL", volume)
+        order_type = mt5.ORDER_TYPE_SELL_STOP
+
+    req = {
         "action": mt5.TRADE_ACTION_PENDING,
         "symbol": SYMBOL,
-        "volume": LOT,
-        "type": mt5.ORDER_TYPE_BUY_STOP if order_type == "BUY" else mt5.ORDER_TYPE_SELL_STOP,
+        "volume": volume,
+        "type": order_type,
         "price": price,
         "deviation": SLIPPAGE,
-        "magic": MAGIC,
-        "comment": "Triggered Pending"
+        "magic": MAGIC
     }
 
-    mt5.order_send(request)
-    print(f"📌 PENDING {order_type} @ {price}")
+    if send_order(req):
+        log(f"📌 {side} STOP {volume} @ {price}")
+        return price
+
+    log("❌ STOP FAILED")
+    return None
+
+
+# -------- CLOSE ALL -------- #
+def close_all():
+    log("🚨 Closing all...")
+
+    positions = mt5.positions_get(symbol=SYMBOL)
+    if positions:
+        for p in positions:
+            tick = mt5.symbol_info_tick(SYMBOL)
+            price = tick.bid if p.type == 0 else tick.ask
+
+            req = {
+                "action": mt5.TRADE_ACTION_DEAL,
+                "symbol": SYMBOL,
+                "volume": p.volume,
+                "type": mt5.ORDER_TYPE_SELL if p.type == 0 else mt5.ORDER_TYPE_BUY,
+                "position": p.ticket,
+                "price": price,
+                "deviation": SLIPPAGE,
+                "magic": MAGIC
+            }
+
+            send_order(req)
+
+    cancel_pending()
+    log("💰 ALL CLOSED")
+
 
 # -------- MAIN -------- #
 def run():
-    print("🚀 TRIGGER BASED BOT STARTED")
+    gap = float(input("Enter gap: "))
+    vol_gen = volume_generator()
 
-    # Initial orders
-    buy_price = place_market("BUY")
-    sell_price = buy_price - GAP
+    first_vol = next(vol_gen)
+    entry_price = market_order("BUY", first_vol)
 
-    place_market("SELL")
+    if not entry_price:
+        return
 
-    last_positions = set()
+    base_equity = mt5.account_info().profit
+
+    log(f"🎯 Target Profit: {PROFIT_UNIT}")
+
+    next_vol = next(vol_gen)
+    place_stop("SELL", entry_price - gap, next_vol)
+
+    last_count = 1
 
     while True:
         time.sleep(1)
 
-        positions = mt5.positions_get(symbol=SYMBOL)
-        if not positions:
-            continue
+        acc = mt5.account_info()
+        profit = acc.profit - base_equity
 
-        current_tickets = set(p.ticket for p in positions)
+        # ✅ FIXED PROFIT EXIT
+        if profit >= PROFIT_UNIT:
+            log(f"🎯 PROFIT HIT {profit}")
+            close_all()
+            break
 
-        # Detect NEW trigger
-        new_trades = current_tickets - last_positions
+        if profit <= -LOSS_TARGET:
+            log(f"❌ LOSS HIT {profit}")
+            close_all()
+            break
 
-        for pos in positions:
-            if pos.ticket in new_trades:
-                if pos.type == mt5.POSITION_TYPE_BUY:
-                    next_price = pos.price_open - GAP
-                    place_pending("SELL", next_price)
+        positions = mt5.positions_get(symbol=SYMBOL) or []
+        current_count = len(positions)
 
-                elif pos.type == mt5.POSITION_TYPE_SELL:
-                    next_price = pos.price_open + GAP
-                    place_pending("BUY", next_price)
+        if current_count > last_count:
 
-        last_positions = current_tickets
+            new_pos = positions[-1]
+
+            next_vol = next(vol_gen)
+
+            if new_pos.type == mt5.POSITION_TYPE_BUY:
+                next_side = "SELL"
+                next_price = new_pos.price_open - gap
+            else:
+                next_side = "BUY"
+                next_price = new_pos.price_open + gap
+
+            log(f"🔁 Trigger → {next_side} STOP {next_vol} @ {next_price}")
+
+            place_stop(next_side, next_price, next_vol)
+
+            last_count = current_count
+
 
 # -------- RUN -------- #
 run()
