@@ -1,15 +1,27 @@
+'''	B		B		B		B	
+volume = 0.01	4000	0.03	4001	0.05	4002	0.07	4003	
+volume = 0.02	3999	0.04	4000	0.06	4001	0.08	4002	
+	S		S		S		S	  
+								
+	B		B		B		B	
+volume = 0.01	3998	0.03	3999	0.05	4000	0.07	4001	
+volume = 0.02	3997	0.04	3998	0.06	3999	0.08	4000	
+	S		S		S		S	
+								
+'''
+
 import MetaTrader5 as mt5
 import time
 from datetime import datetime
 
 # -------- CONFIG -------- #
 SYMBOL = "XAUUSD"
-MAGIC = 3003
+MAGIC_1 = 3001
+MAGIC_2 = 3002
 SLIPPAGE = 100
 PROFIT_UNIT = 3
 LOSS_TARGET = 1000
-MAX_RETRIES = 3
-OFFSET = 2   # distance between patterns
+OFFSET = 2
 
 # -------- INIT -------- #
 if not mt5.initialize():
@@ -25,6 +37,10 @@ def now():
 def log(*msg):
     print(f"[{now()}]", *msg)
 
+def count_positions(magic):
+    positions = mt5.positions_get(symbol=SYMBOL) or []
+    return len([p for p in positions if p.magic == magic])
+
 # -------- VOLUME -------- #
 def volume_generator():
     v = 0.01
@@ -32,17 +48,12 @@ def volume_generator():
         yield round(v, 2)
         v += 0.01
 
-# -------- ORDER SEND -------- #
+# -------- ORDER -------- #
 def send_order(req):
-    for fill in [mt5.ORDER_FILLING_RETURN, mt5.ORDER_FILLING_IOC, mt5.ORDER_FILLING_FOK]:
-        req["type_filling"] = fill
-        result = mt5.order_send(req)
-        if result and result.retcode == mt5.TRADE_RETCODE_DONE:
-            return True
-    return False
+    result = mt5.order_send(req)
+    return result and result.retcode == mt5.TRADE_RETCODE_DONE
 
-# -------- MARKET -------- #
-def market_order(side, volume):
+def market_order(side, volume, magic):
     tick = mt5.symbol_info_tick(SYMBOL)
     price = tick.ask if side == "BUY" else tick.bid
 
@@ -53,26 +64,24 @@ def market_order(side, volume):
         "type": mt5.ORDER_TYPE_BUY if side == "BUY" else mt5.ORDER_TYPE_SELL,
         "price": price,
         "deviation": SLIPPAGE,
-        "magic": MAGIC
+        "magic": magic
     }
 
     if send_order(req):
-        log(f"✅ {side} {volume} @ {price}")
+        log(f"✅ {side} {volume} @ {price} (M{magic})")
         return price
     return None
 
-# -------- STOP -------- #
-def place_stop(side, price, volume):
+def place_stop(side, price, volume, magic):
     tick = mt5.symbol_info_tick(SYMBOL)
 
-    if side == "BUY":
-        if tick.ask >= price:
-            return market_order("BUY", volume)
-        order_type = mt5.ORDER_TYPE_BUY_STOP
-    else:
-        if tick.bid <= price:
-            return market_order("SELL", volume)
-        order_type = mt5.ORDER_TYPE_SELL_STOP
+    if side == "BUY" and tick.ask >= price:
+        return market_order("BUY", volume, magic)
+
+    if side == "SELL" and tick.bid <= price:
+        return market_order("SELL", volume, magic)
+
+    order_type = mt5.ORDER_TYPE_BUY_STOP if side == "BUY" else mt5.ORDER_TYPE_SELL_STOP
 
     req = {
         "action": mt5.TRADE_ACTION_PENDING,
@@ -81,14 +90,46 @@ def place_stop(side, price, volume):
         "type": order_type,
         "price": price,
         "deviation": SLIPPAGE,
-        "magic": MAGIC
+        "magic": magic
     }
 
     if send_order(req):
-        log(f"📌 {side} STOP {volume} @ {price}")
+        log(f"📌 {side} STOP {volume} @ {price} (M{magic})")
 
-# -------- CLOSE ALL -------- #
+def place_pending_only(side, price, volume, magic):
+    tick = mt5.symbol_info_tick(SYMBOL)
+
+    if side == "BUY":
+        # 🔥 decide order type correctly
+        if price < tick.ask:
+            order_type = mt5.ORDER_TYPE_BUY_LIMIT
+        else:
+            order_type = mt5.ORDER_TYPE_BUY_STOP
+    else:
+        if price > tick.bid:
+            order_type = mt5.ORDER_TYPE_SELL_LIMIT
+        else:
+            order_type = mt5.ORDER_TYPE_SELL_STOP
+
+    req = {
+        "action": mt5.TRADE_ACTION_PENDING,
+        "symbol": SYMBOL,
+        "volume": volume,
+        "type": order_type,
+        "price": price,
+        "deviation": SLIPPAGE,
+        "magic": magic
+    }
+
+    result = mt5.order_send(req)
+
+    if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+        log(f"📌 INIT {side} {volume} @ {price} (M{magic})")
+    else:
+        log(f"❌ INIT FAILED {side} @ {price}")
+# -------- CLOSE -------- #
 def close_all():
+    log("🚨 Closing all...")
     positions = mt5.positions_get(symbol=SYMBOL)
     if positions:
         for p in positions:
@@ -103,13 +144,13 @@ def close_all():
                 "position": p.ticket,
                 "price": price,
                 "deviation": SLIPPAGE,
-                "magic": MAGIC
+                "magic": p.magic
             }
             send_order(req)
 
     log("💰 ALL CLOSED")
 
-# -------- PATTERN ENGINE -------- #
+# -------- PRICE LOGIC -------- #
 def next_price(base, step, gap):
     if step % 2 == 1:
         level = step // 2
@@ -121,25 +162,32 @@ def next_price(base, step, gap):
 # -------- MAIN -------- #
 def run():
     gap = float(input("Enter gap: "))
-    vol_gen = volume_generator()
 
-    # FIRST PATTERN
-    v1 = next(vol_gen)
-    base1 = market_order("BUY", v1)
+    vol1 = volume_generator()
+    vol2 = volume_generator()
 
-    # SECOND PATTERN (OFFSET)
-    v2 = next(vol_gen)
+    # -------- PATTERN 1 -------- #
+    base1 = market_order("BUY", next(vol1), MAGIC_1)
+
+    # -------- PATTERN 2 -------- #
     base2 = base1 - OFFSET * gap
-    market_order("BUY", v2)
 
-    state1 = {"base": base1, "step": 1}
-    state2 = {"base": base2, "step": 1}
+    log(f"📊 Base1: {base1}")
+    log(f"📊 Base2: {base2}")
 
-    place_stop("SELL", base1 - gap, next(vol_gen))
-    place_stop("SELL", base2 - gap, next(vol_gen))
+    place_pending_only("BUY", base2, next(vol2), MAGIC_2)
+
+    # initial SELLs
+    place_stop("SELL", base1 - gap, next(vol1), MAGIC_1)
+    place_stop("SELL", base2 - gap, next(vol2), MAGIC_2)
+
+    step1 = 1
+    step2 = 1
+
+    last_p1 = count_positions(MAGIC_1)
+    last_p2 = count_positions(MAGIC_2)
 
     base_equity = mt5.account_info().profit
-    last_count = 2
 
     while True:
         time.sleep(1)
@@ -151,19 +199,30 @@ def run():
             close_all()
             break
 
-        positions = mt5.positions_get(symbol=SYMBOL) or []
+        p1 = count_positions(MAGIC_1)
+        p2 = count_positions(MAGIC_2)
 
-        if len(positions) > last_count:
+        # Pattern 1 trigger
+        if p1 > last_p1:
+            step1 += 1
+            side, price = next_price(base1, step1, gap)
+            vol = next(vol1)
 
-            for state in [state1, state2]:
-                state["step"] += 1
-                side, price = next_price(state["base"], state["step"], gap)
-                vol = next(vol_gen)
+            log(f"🔁 P1 → {side} {vol} @ {price}")
+            place_stop(side, price, vol, MAGIC_1)
 
-                log(f"🔁 P{1 if state==state1 else 2} → {side} {vol} @ {price}")
-                place_stop(side, price, vol)
+            last_p1 = p1
 
-            last_count = len(positions)
+        # Pattern 2 trigger
+        if p2 > last_p2:
+            step2 += 1
+            side, price = next_price(base2, step2, gap)
+            vol = next(vol2)
+
+            log(f"🔁 P2 → {side} {vol} @ {price}")
+            place_stop(side, price, vol, MAGIC_2)
+
+            last_p2 = p2
 
 # -------- RUN -------- #
 run()

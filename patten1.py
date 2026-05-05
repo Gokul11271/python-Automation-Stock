@@ -1,3 +1,11 @@
+"""								
+	B		B		B		B	
+volume = 0.01	4000	0.03	4001	0.05	4002	0.07	4003	
+volume = 0.02	3999	0.04	4000	0.06	4001	0.08	4002	
+	S		S		S		S	  
+"""
+
+
 import MetaTrader5 as mt5
 import time
 from datetime import datetime
