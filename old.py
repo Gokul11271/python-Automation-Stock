@@ -13,7 +13,7 @@ MAGIC_SELL = 5002
 
 SLIPPAGE = 100
 
-PROFIT_TARGET = 20
+PROFIT_TARGET = 1
 LOSS_LIMIT = 1000
 
 # =========================================================
@@ -28,36 +28,16 @@ mt5.symbol_select(SYMBOL, True)
 # =========================================================
 # SOUND INIT
 # =========================================================
-pygame.init()
-
 pygame.mixer.init()
 
 try:
 
-    # =====================================================
-    # LOAD SOUNDS
-    # =====================================================
     trade_sound = pygame.mixer.Sound("tradewave.mp3")
-
-    close_sound = pygame.mixer.Sound("closewave.mp3")
-
     trade_sound.set_volume(0.5)
 
-    close_sound.set_volume(0.7)
-
-    # =====================================================
-    # SEPARATE CHANNELS
-    # =====================================================
-    trade_channel = pygame.mixer.Channel(0)
-
-    close_channel = pygame.mixer.Channel(1)
-
-except Exception as e:
-
-    print("❌ Sound Load Error:", e)
+except:
 
     trade_sound = None
-    close_sound = None
 
 # =========================================================
 # LOG
@@ -74,22 +54,7 @@ def play_trade_sound():
     try:
 
         if trade_sound:
-
-            trade_channel.play(trade_sound)
-
-    except:
-        pass
-
-# =========================================================
-# CLOSE SOUND
-# =========================================================
-def play_close_sound():
-
-    try:
-
-        if close_sound:
-
-            close_channel.play(close_sound)
+            trade_sound.play()
 
     except:
         pass
@@ -114,6 +79,12 @@ def send(req):
 
 # =========================================================
 # VOLUME GENERATOR
+# =========================================================
+#
+# 0.01
+# 0.02
+# 0.03
+#
 # =========================================================
 def volume_gen():
 
@@ -266,15 +237,9 @@ def place_exact(side, price, volume, magic):
 def close_all():
 
     log("🚨 Closing all...")
+    
 
-    # =====================================================
-    # PLAY CLOSE SOUND ONCE
-    # =====================================================
-    play_close_sound()
-
-    # =====================================================
-    # CLOSE POSITIONS
-    # =====================================================
+    # -------- CLOSE POSITIONS -------- #
     positions = mt5.positions_get(symbol=SYMBOL) or []
 
     for p in positions:
@@ -304,9 +269,7 @@ def close_all():
 
         send(req)
 
-    # =====================================================
-    # REMOVE PENDING
-    # =====================================================
+    # -------- REMOVE PENDING -------- #
     orders = mt5.orders_get(symbol=SYMBOL) or []
 
     for o in orders:
@@ -319,9 +282,24 @@ def close_all():
         log(f"❌ Removed Pending {o.ticket}")
 
     log("💰 ALL CLOSED")
+    
 
 # =========================================================
 # BUY ENGINE
+# =========================================================
+#
+# BUY increments by +1
+#
+# BUY  4000
+# BUY  4001
+# BUY  4002
+#
+# SELL hedge remains gap below
+#
+# SELL 3998
+# SELL 3999
+# SELL 4000
+#
 # =========================================================
 def next_buy_pattern(base, step, gap):
 
@@ -345,6 +323,20 @@ def next_buy_pattern(base, step, gap):
 
 # =========================================================
 # SELL ENGINE
+# =========================================================
+#
+# SELL decrements by -1
+#
+# SELL 4000
+# SELL 3999
+# SELL 3998
+#
+# BUY hedge remains gap above
+#
+# BUY 4002
+# BUY 4001
+# BUY 4000
+#
 # =========================================================
 def next_sell_pattern(base, step, gap):
 
@@ -522,8 +514,3 @@ def run():
 # RUN
 # =========================================================
 run()
-
-# =========================================================
-# CLEANUP
-# =========================================================
-pygame.quit()
