@@ -13,7 +13,7 @@ MAGIC_SELL = 5002
 
 SLIPPAGE = 100
 
-PROFIT_TARGET = 20
+PROFIT_TARGET = 50
 LOSS_LIMIT = 1000
 
 # =========================================================
