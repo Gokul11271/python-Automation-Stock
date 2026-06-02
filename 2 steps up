@@ -1,0 +1,333 @@
+import MetaTrader5 as mt5
+import time
+from datetime import datetime
+
+# =========================================================
+# CONFIG
+# =========================================================
+SYMBOL = "XAUUSD"
+
+MAGIC_P1 = 10001
+MAGIC_P2 = 10002
+
+SLIPPAGE = 100
+TARGET_PROFIT = 5
+
+# =========================================================
+# INIT MT5
+# =========================================================
+if not mt5.initialize():
+    print("❌ MT5 Initialization Failed")
+    quit()
+
+mt5.symbol_select(SYMBOL, True)
+
+# =========================================================
+# HELPERS
+# =========================================================
+def now():
+    return datetime.now().strftime("%H:%M:%S")
+
+def log(msg):
+    print(f"[{now()}] {msg}")
+
+def ask():
+    return mt5.symbol_info_tick(SYMBOL).ask
+
+def bid():
+    return mt5.symbol_info_tick(SYMBOL).bid
+
+# =========================================================
+# POSITION COUNT
+# =========================================================
+def position_count(magic):
+
+    positions = mt5.positions_get(symbol=SYMBOL)
+
+    if positions is None:
+        return 0
+
+    return len([p for p in positions if p.magic == magic])
+
+# =========================================================
+# TOTAL PROFIT
+# =========================================================
+def total_profit():
+
+    positions = mt5.positions_get(symbol=SYMBOL)
+
+    if positions is None:
+        return 0
+
+    return sum(p.profit for p in positions)
+
+# =========================================================
+# MARKET ORDER
+# =========================================================
+def market_order(side, volume, magic):
+
+    price = ask() if side == "BUY" else bid()
+
+    request = {
+        "action": mt5.TRADE_ACTION_DEAL,
+        "symbol": SYMBOL,
+        "volume": volume,
+        "type": mt5.ORDER_TYPE_BUY if side == "BUY" else mt5.ORDER_TYPE_SELL,
+        "price": price,
+        "deviation": SLIPPAGE,
+        "magic": magic,
+        "comment": "PATTERN_GRID"
+    }
+
+    result = mt5.order_send(request)
+
+    if result.retcode == mt5.TRADE_RETCODE_DONE:
+
+        log(f"✅ MARKET {side} {volume} @ {price}")
+
+        return price
+
+    log("❌ MARKET ORDER FAILED")
+    return None
+
+# =========================================================
+# PENDING ORDER
+# =========================================================
+def place_pending(side, volume, price, magic):
+
+    current_ask = ask()
+    current_bid = bid()
+
+    # BUY
+    if side == "BUY":
+
+        if price > current_ask:
+            order_type = mt5.ORDER_TYPE_BUY_STOP
+        else:
+            order_type = mt5.ORDER_TYPE_BUY_LIMIT
+
+    # SELL
+    else:
+
+        if price < current_bid:
+            order_type = mt5.ORDER_TYPE_SELL_STOP
+        else:
+            order_type = mt5.ORDER_TYPE_SELL_LIMIT
+
+    request = {
+        "action": mt5.TRADE_ACTION_PENDING,
+        "symbol": SYMBOL,
+        "volume": volume,
+        "type": order_type,
+        "price": price,
+        "deviation": SLIPPAGE,
+        "magic": magic,
+        "comment": "PATTERN_GRID"
+    }
+
+    result = mt5.order_send(request)
+
+    if result.retcode == mt5.TRADE_RETCODE_DONE:
+
+        log(f"📌 {side} {volume} @ {price}")
+
+        return result.order
+
+    log(f"❌ Pending Failed {side} {volume}")
+
+    return None
+
+# =========================================================
+# CLOSE ALL
+# =========================================================
+def close_all():
+
+    log("🚨 Closing Everything")
+
+    # CLOSE POSITIONS
+    positions = mt5.positions_get(symbol=SYMBOL)
+
+    if positions:
+
+        for p in positions:
+
+            if p.type == mt5.POSITION_TYPE_BUY:
+
+                close_type = mt5.ORDER_TYPE_SELL
+                price = bid()
+
+            else:
+
+                close_type = mt5.ORDER_TYPE_BUY
+                price = ask()
+
+            request = {
+                "action": mt5.TRADE_ACTION_DEAL,
+                "symbol": SYMBOL,
+                "position": p.ticket,
+                "volume": p.volume,
+                "type": close_type,
+                "price": price,
+                "deviation": SLIPPAGE,
+                "magic": p.magic
+            }
+
+            mt5.order_send(request)
+
+    # REMOVE PENDING
+    orders = mt5.orders_get(symbol=SYMBOL)
+
+    if orders:
+
+        for o in orders:
+
+            remove_request = {
+                "action": mt5.TRADE_ACTION_REMOVE,
+                "order": o.ticket
+            }
+
+            mt5.order_send(remove_request)
+
+    log("✅ ALL CLOSED")
+
+# =========================================================
+# MAIN
+# =========================================================
+gap = float(input("Enter Gap: "))
+
+# =========================================================
+# START PATTERN 1
+# BUY FIXED
+# SELL MOVES DOWN
+# =========================================================
+base_buy = market_order(
+    "BUY",
+    0.01,
+    MAGIC_P1
+)
+
+if base_buy is None:
+    quit()
+
+# =========================================================
+# START PATTERN 2
+# SELL FIXED
+# BUY MOVES UP
+# =========================================================
+base_sell = base_buy + gap
+
+# INITIAL PATTERN 2 SELL
+place_pending(
+    "SELL",
+    0.01,
+    base_sell,
+    MAGIC_P2
+)
+
+# INITIAL PATTERN 1 SELL
+place_pending(
+    "SELL",
+    0.02,
+    base_buy - gap,
+    MAGIC_P1
+)
+
+# =========================================================
+# TRACKERS
+# =========================================================
+last_p1_positions = position_count(MAGIC_P1)
+last_p2_positions = position_count(MAGIC_P2)
+
+p1_volume = 0.03
+p2_volume = 0.02
+
+p1_sell_level = 2
+p2_buy_level = 1
+
+# =========================================================
+# MAIN LOOP
+# =========================================================
+while True:
+
+    time.sleep(1)
+
+    # =====================================================
+    # TARGET HIT
+    # =====================================================
+    if total_profit() >= TARGET_PROFIT:
+
+        log("🎯 TARGET HIT")
+
+        close_all()
+
+        break
+
+    # =====================================================
+    # CURRENT POSITIONS
+    # =====================================================
+    current_p1_positions = position_count(MAGIC_P1)
+    current_p2_positions = position_count(MAGIC_P2)
+
+    # =====================================================
+    # PATTERN 1 TRIGGERED
+    # =====================================================
+    if current_p1_positions > last_p1_positions:
+
+        # ODD VOLUME = BUY FIXED
+        if int(p1_volume * 100) % 2 == 1:
+
+            side = "BUY"
+
+            price = base_buy
+
+        # EVEN VOLUME = SELL DOWN
+        else:
+
+            side = "SELL"
+
+            price = base_buy - (gap * p1_sell_level)
+
+            p1_sell_level += 1
+
+        place_pending(
+            side,
+            round(p1_volume, 2),
+            price,
+            MAGIC_P1
+        )
+
+        p1_volume += 0.01
+
+        last_p1_positions = current_p1_positions
+
+    # =====================================================
+    # PATTERN 2 TRIGGERED
+    # =====================================================
+    if current_p2_positions > last_p2_positions:
+
+        # EVEN VOLUME = BUY UP
+        if int(p2_volume * 100) % 2 == 0:
+
+            side = "BUY"
+
+            price = base_sell + (gap * p2_buy_level)
+
+            p2_buy_level += 1
+
+        # ODD VOLUME = SELL FIXED
+        else:
+
+            side = "SELL"
+
+            price = base_sell
+
+        place_pending(
+            side,
+            round(p2_volume, 2),
+            price,
+            MAGIC_P2
+        )
+
+        p2_volume += 0.01
+
+        last_p2_positions = current_p2_positions
