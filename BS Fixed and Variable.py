@@ -12,7 +12,7 @@ MAGIC_P1 = 10001
 MAGIC_P2 = 10002
 
 SLIPPAGE = 100
-TARGET_PROFIT = 50
+TARGET_PROFIT = 500
 
 # =========================================================
 # SOUND INIT
