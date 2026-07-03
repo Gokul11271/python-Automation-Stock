@@ -6,7 +6,7 @@ import pygame
 # SETTINGS
 # =========================
 
-PROFIT_TARGET = 1    # Close all trades at +$5
+PROFIT_TARGET = 30    # Close all trades at +$5
 LOSS_LIMIT = -200      # Close all trades at -$20
 
 CHECK_INTERVAL = 2     # seconds
