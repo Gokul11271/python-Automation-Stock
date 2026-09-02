@@ -16,12 +16,12 @@ from datetime import datetime
 
 
 # ------------------- Config ------------------- #
-SYMBOL = "XAUUSD_"    # trading symbol (set to your broker's symbol name)
+SYMBOL = "XAUUSD"    # trading symbol (set to your broker's symbol name)
 SLIPPAGE = 500           # allowed deviation in points
 MAGIC = 12345            # magic number
-LOSS_TARGET = 500.0       # equity loss stop (in $)
+LOSS_TARGET = 100       # equity loss stop (in $)
 # POLL_INTERVAL = 0.5       # seconds between main loop polls
-DEFAULT_PROFIT_TARGET = 0.5  # default $ profit target
+DEFAULT_PROFIT_TARGET = 0.5000  # default $ profit target
 
 # ------------------- Globals ------------------- #
 order_log = []  # stores history of triggered trades
@@ -89,7 +89,7 @@ def formula25_table(vol_min=0.01, vol_step=0.01, rows=14):
     target_profit = 0.0
     vol = vol_min
     for _ in range(rows):
-        target_profit += vol * 50
+        target_profit += vol * 100
         actual = vol * 14.6
         col25 = target_profit / 2
         data.append({
@@ -105,7 +105,7 @@ def formula25_generator(vol_min=0.01, vol_step=0.01):
     target_profit = 0.0
     vol = vol_min
     while True:
-        target_profit += vol * 50
+        target_profit += vol * 100
         yield (round(vol, 2), round(target_profit, 2))
         vol += vol_step
 

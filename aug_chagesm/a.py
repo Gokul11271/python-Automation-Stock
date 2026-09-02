@@ -4,20 +4,21 @@ import time
 from datetime import datetime
 
 # =========================================================
-# CONFIG
+# CONFIGURATION & DEFAULT VARIABLES
 # =========================================================
 SYMBOL = "XAUUSD"
-
 MAGIC_P1 = 10001
-MAGIC_P2 = 10002
-
 SLIPPAGE = 100
-DEFAULT_TARGET_PERCENTAGE = 600.0  # Set default target percentage here
+
+DEFAULT_GAP = 2.0                    # Default gap size
+DEFAULT_TARGET_PERCENTAGE = 80.0   # Dynamic profit percentage
+MAX_LOSS_LIMIT = 500.0               # Max floating loss in USD (stops bot if hit)
+MAX_LOT_CAP = 0.50                  # Volume cap (stays at 0.10 after step 10)
 
 PROFIT_SOUND_PATH = r"C:\Users\hp\Downloads\cash-register-purchase-87313.mp3"
 
 # =========================================================
-# SOUND INIT
+# SOUND INITIALIZATION
 # =========================================================
 pygame.init()
 pygame.mixer.init()
@@ -33,14 +34,13 @@ try:
     close_sound.set_volume(1.0)
 
     print("✅ Sounds Loaded")
-
 except Exception as e:
     print("❌ Sound Load Failed")
     print(e)
     quit()
 
 # =========================================================
-# MT5 INIT
+# MT5 INITIALIZATION
 # =========================================================
 if not mt5.initialize():
     print("❌ MT5 Init Failed")
@@ -69,38 +69,34 @@ def bid():
 def play_trade_sound():
     try:
         trade_channel.play(trade_sound)
-    except:
+    except Exception:
         pass
 
 def play_close_sound():
     try:
         close_channel.play(close_sound)
-    except:
+    except Exception:
         pass
 
-def play_mp3_repeat(file_path=PROFIT_SOUND_PATH, repeat=2, gap=0.1, label="💰 Profit Sound"):
+def play_profit_sound(file_path=PROFIT_SOUND_PATH, repeat=2, gap_sec=0.1):
     try:
-        print(f"{label} (×{repeat})")
         pygame.mixer.music.load(file_path)
         for _ in range(repeat):
             pygame.mixer.music.play()
             while pygame.mixer.music.get_busy():
                 time.sleep(0.1)
-            time.sleep(gap)
+            time.sleep(gap_sec)
     except Exception as e:
-        print(f"⚠️ Could not play custom sound: {e}")
+        print(f"⚠️ Custom sound error: {e}")
 
 # =========================================================
 # ACTIVE POSITION METRICS
 # =========================================================
-def get_active_positions(magic=None):
-    """Returns only real executed market positions."""
+def get_active_positions(magic=MAGIC_P1):
     positions = mt5.positions_get(symbol=SYMBOL)
     if positions is None:
         return []
-    if magic is not None:
-        return [p for p in positions if p.magic == magic]
-    return [p for p in positions if p.magic in (MAGIC_P1, MAGIC_P2)]
+    return [p for p in positions if p.magic == magic]
 
 def total_profit():
     positions = get_active_positions()
@@ -110,22 +106,16 @@ def total_executed_volume():
     positions = get_active_positions()
     return sum(p.volume for p in positions)
 
-def get_target_money_threshold(gap_val, target_pct):
-    """
-    100% means 1 Gap distance of target profit per 0.01 lot.
-    Total Target $ = (Executed Lots / 0.01) * (Target % / 100) * (Gap in USD)
-    For Gold (100 oz contract): 0.01 lot * 1.0 point price change = $1.00
-    """
+def get_target_money_threshold(target_pct):
     exec_vol = total_executed_volume()
     if exec_vol <= 0:
         return 0.0
-    
     vol_units = round(exec_vol / 0.01, 2)
-    unit_target = (target_pct / 100.0) * gap_val
+    unit_target = target_pct / 100.0
     return round(vol_units * unit_target, 2)
 
 # =========================================================
-# MARKET ORDER
+# ORDER FUNCTIONS
 # =========================================================
 def market_order(side, volume, magic):
     price = ask() if side == "BUY" else bid()
@@ -151,25 +141,14 @@ def market_order(side, volume, magic):
     log(f"❌ MARKET ORDER FAILED: {result.comment}")
     return None
 
-# =========================================================
-# PENDING ORDER
-# =========================================================
 def place_pending(side, volume, price, magic):
     current_ask = ask()
     current_bid = bid()
 
-    # BUY
     if side == "BUY":
-        if price > current_ask:
-            order_type = mt5.ORDER_TYPE_BUY_STOP
-        else:
-            order_type = mt5.ORDER_TYPE_BUY_LIMIT
-    # SELL
+        order_type = mt5.ORDER_TYPE_BUY_STOP if price > current_ask else mt5.ORDER_TYPE_BUY_LIMIT
     else:
-        if price < current_bid:
-            order_type = mt5.ORDER_TYPE_SELL_STOP
-        else:
-            order_type = mt5.ORDER_TYPE_SELL_LIMIT
+        order_type = mt5.ORDER_TYPE_SELL_STOP if price < current_bid else mt5.ORDER_TYPE_SELL_LIMIT
 
     request = {
         "action": mt5.TRADE_ACTION_PENDING,
@@ -192,17 +171,13 @@ def place_pending(side, volume, price, magic):
     log(f"❌ Pending Failed {side} {volume:.2f} @ {price:.2f} -> {result.comment}")
     return False
 
-# =========================================================
-# CLOSE EVERYTHING
-# =========================================================
-def close_all():
+def close_all(is_profit=True):
     log("🚨 Closing Everything")
 
-    # CLOSE EXECUTED POSITIONS
     positions = mt5.positions_get(symbol=SYMBOL)
     if positions:
         for p in positions:
-            if p.magic in (MAGIC_P1, MAGIC_P2):
+            if p.magic == MAGIC_P1:
                 close_type = mt5.ORDER_TYPE_SELL if p.type == mt5.POSITION_TYPE_BUY else mt5.ORDER_TYPE_BUY
                 price = bid() if p.type == mt5.POSITION_TYPE_BUY else ask()
 
@@ -217,105 +192,105 @@ def close_all():
                 }
                 mt5.order_send(request)
 
-    # CANCEL PENDING ORDERS
     orders = mt5.orders_get(symbol=SYMBOL)
     if orders:
         for o in orders:
-            if o.magic in (MAGIC_P1, MAGIC_P2):
+            if o.magic == MAGIC_P1:
                 mt5.order_send({
                     "action": mt5.TRADE_ACTION_REMOVE,
                     "order": o.ticket
                 })
 
     play_close_sound()
-    play_mp3_repeat(PROFIT_SOUND_PATH, repeat=2, label="💰 Profit Sound")
+    if is_profit:
+        play_profit_sound()
     log("✅ ALL CLOSED")
 
 # =========================================================
-# MAIN
+# STRATEGY RUN CYCLE
 # =========================================================
-gap = float(input("Enter Gap: "))
-profit_pct = DEFAULT_TARGET_PERCENTAGE
+def run_strategy_cycle(gap, profit_pct, loss_limit):
+    base_buy = market_order("BUY", 0.01, MAGIC_P1)
+    if base_buy is None:
+        return "FAILED"
+
+    # Initial pending sell for Pattern 1
+    place_pending("SELL", 0.02, round(base_buy - gap, 2), MAGIC_P1)
+
+    last_p1_positions = len(get_active_positions(MAGIC_P1))
+    
+    current_step = 3
+    p1_sell_price = round((base_buy - gap) - gap, 2)
+
+    while True:
+        time.sleep(1)
+
+        current_prof = total_profit()
+        target_prof = get_target_money_threshold(profit_pct)
+        exec_vol = total_executed_volume()
+
+        if exec_vol > 0:
+            log(f"Status: Executed Vol={exec_vol:.2f} | Profit=${current_prof:.2f} | Target=${target_prof:.2f} | Max Loss=-${loss_limit:.2f}")
+
+        # Target Profit Hit
+        if target_prof > 0 and current_prof >= target_prof:
+            log(f"🎯 TARGET PROFIT HIT -> ${current_prof:.2f} >= ${target_prof:.2f}")
+            close_all(is_profit=True)
+            return "PROFIT_HIT"
+
+        # Max Loss Limit Hit
+        if current_prof <= -abs(loss_limit):
+            log(f"🛑 MAX LOSS LIMIT HIT -> ${current_prof:.2f} <= -${abs(loss_limit):.2f}")
+            close_all(is_profit=False)
+            return "LOSS_HIT"
+
+        # Position tracking and next order placement
+        current_p1_positions = len(get_active_positions(MAGIC_P1))
+
+        if current_p1_positions > last_p1_positions:
+            raw_vol = round(current_step * 0.01, 2)
+            assigned_volume = min(raw_vol, MAX_LOT_CAP)
+
+            # Odd = Buy Static | Even = Sell Downward
+            if current_step % 2 == 1:
+                side = "BUY"
+                price = base_buy
+            else:
+                side = "SELL"
+                price = p1_sell_price
+                p1_sell_price = round(p1_sell_price - gap, 2)
+
+            place_pending(side, assigned_volume, price, MAGIC_P1)
+            
+            current_step += 1
+            last_p1_positions = current_p1_positions
 
 # =========================================================
-# PATTERN 1: INITIAL MARKET BUY
+# MAIN EXECUTION CONTROLLER
 # =========================================================
-base_buy = market_order("BUY", 0.01, MAGIC_P1)
+print("=== TRADING BOT CONTROLLER ===")
+mode_input = input("Select Mode: [1] Manual (Run Once) | [2] Automation (Loop): ").strip()
+is_automated = (mode_input == "2")
 
-if base_buy is None:
-    quit()
+log(f"Starting in {'AUTOMATION' if is_automated else 'MANUAL'} mode...")
 
-# =========================================================
-# PATTERN 2: INITIAL SETUP
-# =========================================================
-base_sell = round(base_buy + gap, 2)
-
-# Pattern 2 initial pending SELL
-place_pending("SELL", 0.01, base_sell, MAGIC_P2)
-
-# Pattern 1 initial pending SELL
-place_pending("SELL", 0.02, round(base_buy - gap, 2), MAGIC_P1)
-
-# =========================================================
-# TRACKERS
-# =========================================================
-last_p1_count = len(get_active_positions(MAGIC_P1))
-last_p2_count = len(get_active_positions(MAGIC_P2))
-
-# NEXT VOLUMES
-p1_volume = 0.03
-p2_volume = 0.02
-
-# PRICE TRACKERS
-p1_sell_price = (base_buy - gap) - 1.0
-p2_buy_price = base_sell + gap
-
-# =========================================================
-# LOOP
-# =========================================================
 while True:
-    time.sleep(1)
-
-    # 1. Evaluate Target Profit Trigger
-    current_prof = total_profit()
-    target_prof = get_target_money_threshold(gap, profit_pct)
-    exec_vol = total_executed_volume()
-
-    if exec_vol > 0:
-        log(f"Status: Positions Vol={exec_vol:.2f} | Current Profit=${current_prof:.2f} | Target=${target_prof:.2f}")
-
-    if target_prof > 0 and current_prof >= target_prof:
-        log(f"🎯 TARGET PROFIT HIT -> ${current_prof:.2f} >= ${target_prof:.2f}")
-        close_all()
+    result = run_strategy_cycle(DEFAULT_GAP, DEFAULT_TARGET_PERCENTAGE, MAX_LOSS_LIMIT)
+    
+    # Mode 1: Manual Mode (Always exits after 1 cycle)
+    if not is_automated:
+        log("Manual run complete. Shutting down bot...")
         break
-
-    # 2. Check for NEW Executed Deals
-    active_p1 = len(get_active_positions(MAGIC_P1))
-    active_p2 = len(get_active_positions(MAGIC_P2))
-
-    # Trigger next step ONLY when a pending order gets filled
-    if active_p1 > last_p1_count:
-        if int(round(p1_volume * 100)) % 2 == 1:
-            side = "BUY"
-            price = base_buy
-        else:
-            side = "SELL"
-            price = p1_sell_price
-            p1_sell_price -= 1.0
-
-        place_pending(side, p1_volume, price, MAGIC_P1)
-        p1_volume += 0.01
-        last_p1_count = active_p1
-
-    if active_p2 > last_p2_count:
-        if int(round(p2_volume * 100)) % 2 == 0:
-            side = "BUY"
-            price = p2_buy_price
-            p2_buy_price += 1.0
-        else:
-            side = "SELL"
-            price = base_sell
-
-        place_pending(side, p2_volume, price, MAGIC_P2)
-        p2_volume += 0.01
-        last_p2_count = active_p2
+    
+    # Mode 2: Automation Mode Logic
+    if result == "LOSS_HIT":
+        log("🛑 BOT SHUT DOWN: Max loss threshold reached. Loop halted permanently to protect account.")
+        break
+    
+    elif result == "PROFIT_HIT":
+        log("🎯 Target profit reached! Restarting loop in 3 seconds...")
+        time.sleep(3)
+        
+    elif result == "FAILED":
+        log("Initial order execution failed. Retrying in 5 seconds...")
+        time.sleep(5)

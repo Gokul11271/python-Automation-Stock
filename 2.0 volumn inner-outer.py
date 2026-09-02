@@ -15,9 +15,9 @@ MAGIC = 9090
 SLIPPAGE = 50
 
 BASE_LOT = 0.01
-LOT_INCREMENT = 0.01
+LOT_INCREMENT = 0.01  # Linear scaling: 0.01 -> 0.02 -> 0.03...
 
-PROFIT_TARGET = 500
+PROFIT_TARGET = 100
 
 POLL_SECONDS = 0.1
 PLOT_WINDOW = 120
@@ -50,7 +50,15 @@ symbol_info = mt5.symbol_info(SYMBOL)
 DIGITS = symbol_info.digits
 
 # =========================================================
-# HELPERS
+# VOLUME SEQUENCE TRACKING
+# =========================================================
+current_volume = 0.01  
+
+def get_next_volume(vol):
+    return round(vol + LOT_INCREMENT, 2)
+
+# =========================================================
+# CORE MT5 HELPERS
 # =========================================================
 def now():
     return datetime.now().strftime("%H:%M:%S")
@@ -60,9 +68,6 @@ def log(*msg):
 
 def normalize(price):
     return round(price, DIGITS)
-
-def volume_for_step(step):
-    return round(BASE_LOT + ((step - 1) * LOT_INCREMENT), 2)
 
 def get_tick():
     return mt5.symbol_info_tick(SYMBOL)
@@ -87,22 +92,28 @@ def get_latest_position():
 # =========================================================
 def send_order(req):
     result = mt5.order_send(req)
-    if result is None:
-        return None
-    if result.retcode != mt5.TRADE_RETCODE_DONE:
+    if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
         return None
     return result
 
 # =========================================================
-# CANCEL ALL PENDING
+# CLEANUP TOOLS
 # =========================================================
-def cancel_pending():
+def cancel_all_pending():
     orders = my_orders()
     for o in orders:
-        mt5.order_send({
-            "action": mt5.TRADE_ACTION_REMOVE,
-            "order": o.ticket
-        })
+        mt5.order_send({"action": mt5.TRADE_ACTION_REMOVE, "order": o.ticket})
+
+def cancel_opposite_side_outer_pending(hit_level, mid_point):
+    """Wipes out any active pending orders on the entire opposite hemisphere."""
+    orders = my_orders()
+    for o in orders:
+        if hit_level == "LOW" and o.price_open > mid_point:
+            mt5.order_send({"action": mt5.TRADE_ACTION_REMOVE, "order": o.ticket})
+            log(f"🧹 Closed upper opposite pending order at {o.price_open}")
+        elif hit_level == "HIGH" and o.price_open < mid_point:
+            mt5.order_send({"action": mt5.TRADE_ACTION_REMOVE, "order": o.ticket})
+            log(f"🧹 Closed lower opposite pending order at {o.price_open}")
 
 # =========================================================
 # CLOSE ALL
@@ -119,17 +130,8 @@ def close_all():
         if tick is None:
             continue
 
-        price = (
-            tick.bid
-            if p.type == mt5.POSITION_TYPE_BUY
-            else tick.ask
-        )
-
-        close_type = (
-            mt5.ORDER_TYPE_SELL
-            if p.type == mt5.POSITION_TYPE_BUY
-            else mt5.ORDER_TYPE_BUY
-        )
+        price = tick.bid if p.type == mt5.POSITION_TYPE_BUY else tick.ask
+        close_type = mt5.ORDER_TYPE_SELL if p.type == mt5.POSITION_TYPE_BUY else mt5.ORDER_TYPE_BUY
 
         req = {
             "action": mt5.TRADE_ACTION_DEAL,
@@ -141,10 +143,9 @@ def close_all():
             "deviation": SLIPPAGE,
             "magic": MAGIC
         }
-
         send_order(req)
 
-    cancel_pending()
+    cancel_all_pending()
     log("✅ Everything Closed")
 
 # =========================================================
@@ -176,24 +177,13 @@ def place_pending(direction, target_price, lot):
             time.sleep(0.1)
             continue
 
-        ask = tick.ask
-        bid = tick.bid
+        ask, bid = tick.ask, tick.bid
+        adjusted_price = normalize(target_price + shift) if direction == "BUY" else normalize(target_price - shift)
 
         if direction == "BUY":
-            adjusted_price = normalize(target_price + shift)
+            order_type = mt5.ORDER_TYPE_BUY_STOP if adjusted_price > ask else mt5.ORDER_TYPE_BUY_LIMIT
         else:
-            adjusted_price = normalize(target_price - shift)
-
-        if direction == "BUY":
-            if adjusted_price > ask:
-                order_type = mt5.ORDER_TYPE_BUY_STOP
-            else:
-                order_type = mt5.ORDER_TYPE_BUY_LIMIT
-        else:
-            if adjusted_price < bid:
-                order_type = mt5.ORDER_TYPE_SELL_STOP
-            else:
-                order_type = mt5.ORDER_TYPE_SELL_LIMIT
+            order_type = mt5.ORDER_TYPE_SELL_STOP if adjusted_price < bid else mt5.ORDER_TYPE_SELL_LIMIT
 
         req = {
             "action": mt5.TRADE_ACTION_PENDING,
@@ -207,7 +197,6 @@ def place_pending(direction, target_price, lot):
         }
 
         result = mt5.order_send(req)
-
         if result and result.retcode == mt5.TRADE_RETCODE_DONE:
             log(f"✅ Pending {direction} {adjusted_price} lot={lot}")
             return result
@@ -223,36 +212,31 @@ INNER_GAP = float(input("Enter Inner Gap : "))
 OUTER_GAP = float(input("Enter Outer Gap : "))
 
 # =========================================================
-# INITIAL GRID LEVEL LOGIC (Calculated from First Buy)
+# INITIAL SETUP MATRIX
 # =========================================================
 tick = get_tick()
 if tick is None:
     raise RuntimeError("No market price available")
 
-# The current market price serves exactly as your First Buy level (Inner)
 GRID_MID_LOW = normalize(tick.ask) 
-
-# Map outward sequentially based on your blueprint matrix
 GRID_MID_HIGH = normalize(GRID_MID_LOW + INNER_GAP)
-TOP = normalize(GRID_MID_HIGH + OUTER_GAP)
-GRID_HIGH = TOP 
-
+GRID_HIGH = normalize(GRID_MID_HIGH + OUTER_GAP)
 GRID_LOW = normalize(GRID_MID_LOW - OUTER_GAP)
 
+GRID_CENTER = (GRID_MID_HIGH + GRID_MID_LOW) / 2
+
 log("📌 GRID LEVELS CALCULATED")
-log(f"TOP (4004 reference benchmark) : {GRID_HIGH}")
-log(f"OUTER HIGH (4000 benchmark)    : {GRID_MID_HIGH}")
-log(f"INNER FIRST BUY (3998 anchor)  : {GRID_MID_LOW}")
-log(f"BOTTOM (3994 benchmark)        : {GRID_LOW}")
+log(f"TOP (HIGH)       : {GRID_HIGH}")
+log(f"OUTER HIGH       : {GRID_MID_HIGH}")
+log(f"INNER FIRST BUY  : {GRID_MID_LOW}")
+log(f"BOTTOM (LOW)     : {GRID_LOW}")
 
 # =========================================================
-# INITIAL BUY
+# INITIALIZE STEP 1 (Three matching 0.01 volume tiers)
 # =========================================================
-step = 1
-initial_lot = volume_for_step(step)
-log(f"🚀 Initial BUY lot={initial_lot} triggered at Inner Level")
+log(f"🚀 Initial BUY lot={current_volume} triggered at Inner Level")
 
-buy_result = market_buy(initial_lot)
+buy_result = market_buy(current_volume)
 if buy_result is None:
     raise RuntimeError("❌ Initial BUY failed")
 
@@ -262,26 +246,17 @@ if trade_sound:
 
 time.sleep(1)
 
-# =========================================================
-# FIRST GRID PENDINGS
-# =========================================================
-step += 1
-lot = volume_for_step(step)
-
-# Sets the asymmetric traps configured exactly below and above your anchor
-place_pending("SELL", GRID_LOW, lot)
-place_pending("SELL", GRID_MID_HIGH, lot)
+# Places initial protection layouts
+place_pending("SELL", GRID_MID_HIGH, 0.01)         
+place_pending("SELL", GRID_LOW, 0.02)              
 
 # =========================================================
-# TRACK KNOWN TICKETS
+# BASE RUN STATE
 # =========================================================
 known_tickets = set()
 for p in my_positions():
     known_tickets.add(p.ticket)
 
-# =========================================================
-# BASE EQUITY
-# =========================================================
 account = mt5.account_info()
 base_equity = account.equity
 
@@ -300,16 +275,11 @@ while True:
 
     tick = get_tick()
     if tick is not None:
-        mid_price = (tick.ask + tick.bid) / 2
-        price_history.append(mid_price)
+        price_history.append((tick.ask + tick.bid) / 2)
 
-    # =====================================================
-    # DETECT NEW POSITION
-    # =====================================================
     latest_pos = get_latest_position()
 
     if latest_pos and latest_pos.ticket not in known_tickets:
-        cancel_pending()
         known_tickets.add(latest_pos.ticket)
         pos = latest_pos
 
@@ -320,32 +290,55 @@ while True:
             pygame.mixer.stop()
             trade_sound.play()
 
-        step += 1
-        lot = volume_for_step(step)
-
         levels = {
             GRID_LOW: "LOW",
             GRID_MID_LOW: "MID_LOW",
             GRID_MID_HIGH: "MID_HIGH",
             GRID_HIGH: "HIGH"
         }
-
         nearest = min(levels.keys(), key=lambda x: abs(x - pos.price_open))
         level_name = levels[nearest]
-        log(f"📍 Level={level_name}")
+        log(f"📍 Market Breached Level={level_name}")
 
-        if pos.type == mt5.POSITION_TYPE_SELL:
-            if level_name == "LOW":
-                place_pending("BUY", GRID_MID_LOW, lot)
-            elif level_name == "MID_HIGH":
-                place_pending("BUY", GRID_MID_LOW, lot)
-                place_pending("BUY", GRID_HIGH, lot)
+        is_inner_level = level_name in ["MID_LOW", "MID_HIGH"]
+
+        # -----------------------------------------------------------
+        # RULE 1: INNER GRID HIT -> RETAIN LAYERS
+        # -----------------------------------------------------------
+        if is_inner_level:
+            log(f"ℹ️ Inner level hit ({pos.volume}). Retaining all layers untouched.")
+            
+            lot_to_place = current_volume
+            if abs(pos.volume - 0.01) < 0.0001 and len(my_positions()) <= 2:
+                lot_to_place = 0.01
+            
+            if pos.type == mt5.POSITION_TYPE_SELL: 
+                place_pending("BUY", GRID_HIGH, lot_to_place)
+            else: 
+                place_pending("SELL", GRID_LOW, lot_to_place)
+
+        # -----------------------------------------------------------
+        # RULE 2: OUTER GRID HIT -> REMOVE OPPOSITE PENALTY LAYERS
+        # -----------------------------------------------------------
         else:
-            if level_name == "MID_LOW":
-                place_pending("SELL", GRID_LOW, lot)
-                place_pending("SELL", GRID_MID_HIGH, lot)
-            elif level_name == "HIGH":
-                place_pending("SELL", GRID_MID_HIGH, lot)
+            log(f"🚨 Outer level hit ({pos.volume}). Clearing the whole opposite side.")
+            
+            # Wipes opposing structures cleanly using matched function call
+            cancel_opposite_side_outer_pending(level_name, GRID_CENTER)
+            
+            if abs(pos.volume - 0.02) < 0.001 and current_volume == 0.01:
+                current_volume = 0.02
+            else:
+                current_volume = get_next_volume(current_volume)
+                
+            log(f"🔄 Sequence Advanced: Next Volume Matrix Tier = {current_volume}")
+
+            if pos.type == mt5.POSITION_TYPE_SELL: 
+                place_pending("BUY", GRID_MID_LOW, current_volume)
+                place_pending("SELL", GRID_MID_HIGH, current_volume)
+            else: 
+                place_pending("SELL", GRID_MID_HIGH, current_volume)
+                place_pending("BUY", GRID_MID_LOW, current_volume)
 
     # =====================================================
     # PROFIT CHECK
@@ -367,31 +360,14 @@ while True:
 
     if y:
         ax.plot(x, y, linewidth=1.5)
-        ax.scatter([x[-1]], [y[-1]], s=25)
-
     for lvl in [GRID_LOW, GRID_MID_LOW, GRID_MID_HIGH, GRID_HIGH]:
         ax.hlines(lvl, 0, max(1, len(x)), linewidth=1)
 
-    positions = my_positions()
-    for p in positions:
-        marker = "^" if p.type == mt5.POSITION_TYPE_BUY else "v"
-        ax.scatter([x[-1]], [p.price_open], marker=marker, s=70)
-        ax.text(x[-1], p.price_open, f"{p.volume:.2f}", fontsize=8)
-
-    orders = my_orders()
-    for o in orders:
-        ax.scatter([x[-1]], [o.price_open], marker="x", s=70)
-        ax.text(x[-1], o.price_open, f"{o.volume_initial:.2f}", fontsize=8)
-
-    ax.set_title(f"Step={step} | Profit={current_profit:.2f}", fontsize=9)
+    ax.set_title(f"Profit={current_profit:.2f} | Vol Tier={current_volume}", fontsize=8)
     ax.grid(True)
     plt.tight_layout()
     plt.pause(0.01)
 
-# =========================================================
-# CLEANUP
-# =========================================================
 plt.close()
 pygame.quit()
 mt5.shutdown()
-log("✅ BOT FINISHED")

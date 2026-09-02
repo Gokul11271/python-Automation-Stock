@@ -12,7 +12,7 @@ MAGIC_P1 = 10001
 MAGIC_P2 = 10002
 
 SLIPPAGE = 100
-TARGET_PROFIT = 50
+DEFAULT_TARGET_PERCENTAGE = 100.0  # Set default target percentage here
 
 # =========================================================
 # SOUND INIT
@@ -21,7 +21,6 @@ pygame.init()
 pygame.mixer.init()
 
 try:
-
     trade_sound = pygame.mixer.Sound("tradewave.mp3")
     close_sound = pygame.mixer.Sound("closewave.mp3")
 
@@ -34,7 +33,6 @@ try:
     print("✅ Sounds Loaded")
 
 except Exception as e:
-
     print("❌ Sound Load Failed")
     print(e)
     quit()
@@ -43,7 +41,6 @@ except Exception as e:
 # MT5 INIT
 # =========================================================
 if not mt5.initialize():
-
     print("❌ MT5 Init Failed")
     quit()
 
@@ -68,54 +65,61 @@ def bid():
 # SOUND FUNCTIONS
 # =========================================================
 def play_trade_sound():
-
     try:
         trade_channel.play(trade_sound)
     except:
         pass
 
 def play_close_sound():
-
     try:
         close_channel.play(close_sound)
     except:
         pass
 
 # =========================================================
-# POSITION COUNT
+# ACTIVE POSITION METRICS
 # =========================================================
-def position_count(magic):
-
+def get_active_positions(magic=None):
+    """Returns only real executed market positions."""
     positions = mt5.positions_get(symbol=SYMBOL)
-
     if positions is None:
-        return 0
+        return []
+    if magic is not None:
+        return [p for p in positions if p.magic == magic]
+    return [p for p in positions if p.magic in (MAGIC_P1, MAGIC_P2)]
 
-    return len([p for p in positions if p.magic == magic])
-
-# =========================================================
-# TOTAL PROFIT
-# =========================================================
 def total_profit():
-
-    positions = mt5.positions_get(symbol=SYMBOL)
-
-    if positions is None:
-        return 0
-
+    positions = get_active_positions()
     return sum(p.profit for p in positions)
+
+def total_executed_volume():
+    positions = get_active_positions()
+    return sum(p.volume for p in positions)
+
+def get_target_money_threshold(gap_val, target_pct):
+    """
+    100% means 1 Gap distance of target profit per 0.01 lot.
+    Total Target $ = (Executed Lots / 0.01) * (Target % / 100) * (Gap in USD)
+    For Gold (100 oz contract): 0.01 lot * 1.0 point price change = $1.00
+    """
+    exec_vol = total_executed_volume()
+    if exec_vol <= 0:
+        return 0.0
+    
+    vol_units = round(exec_vol / 0.01, 2)
+    unit_target = (target_pct / 100.0) * gap_val
+    return round(vol_units * unit_target, 2)
 
 # =========================================================
 # MARKET ORDER
 # =========================================================
 def market_order(side, volume, magic):
-
     price = ask() if side == "BUY" else bid()
 
     request = {
         "action": mt5.TRADE_ACTION_DEAL,
         "symbol": SYMBOL,
-        "volume": volume,
+        "volume": round(volume, 2),
         "type": mt5.ORDER_TYPE_BUY if side == "BUY" else mt5.ORDER_TYPE_SELL,
         "price": price,
         "deviation": SLIPPAGE,
@@ -126,36 +130,28 @@ def market_order(side, volume, magic):
     result = mt5.order_send(request)
 
     if result.retcode == mt5.TRADE_RETCODE_DONE:
-
-        log(f"✅ MARKET {side} {volume} @ {price}")
-
+        log(f"✅ MARKET {side} {volume:.2f} @ {price:.2f}")
         play_trade_sound()
-
         return price
 
-    log("❌ MARKET ORDER FAILED")
-
+    log(f"❌ MARKET ORDER FAILED: {result.comment}")
     return None
 
 # =========================================================
 # PENDING ORDER
 # =========================================================
 def place_pending(side, volume, price, magic):
-
     current_ask = ask()
     current_bid = bid()
 
     # BUY
     if side == "BUY":
-
         if price > current_ask:
             order_type = mt5.ORDER_TYPE_BUY_STOP
         else:
             order_type = mt5.ORDER_TYPE_BUY_LIMIT
-
     # SELL
     else:
-
         if price < current_bid:
             order_type = mt5.ORDER_TYPE_SELL_STOP
         else:
@@ -164,9 +160,9 @@ def place_pending(side, volume, price, magic):
     request = {
         "action": mt5.TRADE_ACTION_PENDING,
         "symbol": SYMBOL,
-        "volume": volume,
+        "volume": round(volume, 2),
         "type": order_type,
-        "price": price,
+        "price": round(price, 2),
         "deviation": SLIPPAGE,
         "magic": magic,
         "comment": "PATTERN_GRID"
@@ -175,233 +171,136 @@ def place_pending(side, volume, price, magic):
     result = mt5.order_send(request)
 
     if result.retcode == mt5.TRADE_RETCODE_DONE:
-
-        log(f"📌 {side} {volume} @ {price}")
-
+        log(f"📌 {side} {volume:.2f} @ {price:.2f}")
         play_trade_sound()
-
         return True
 
-    log(f"❌ Pending Failed {side} {volume}")
-
+    log(f"❌ Pending Failed {side} {volume:.2f} @ {price:.2f} -> {result.comment}")
     return False
 
 # =========================================================
 # CLOSE EVERYTHING
 # =========================================================
 def close_all():
-
     log("🚨 Closing Everything")
 
-    # CLOSE POSITIONS
+    # CLOSE EXECUTED POSITIONS
     positions = mt5.positions_get(symbol=SYMBOL)
-
     if positions:
-
         for p in positions:
+            if p.magic in (MAGIC_P1, MAGIC_P2):
+                close_type = mt5.ORDER_TYPE_SELL if p.type == mt5.POSITION_TYPE_BUY else mt5.ORDER_TYPE_BUY
+                price = bid() if p.type == mt5.POSITION_TYPE_BUY else ask()
 
-            if p.type == mt5.POSITION_TYPE_BUY:
+                request = {
+                    "action": mt5.TRADE_ACTION_DEAL,
+                    "symbol": SYMBOL,
+                    "position": p.ticket,
+                    "volume": p.volume,
+                    "type": close_type,
+                    "price": price,
+                    "deviation": SLIPPAGE
+                }
+                mt5.order_send(request)
 
-                close_type = mt5.ORDER_TYPE_SELL
-                price = bid()
-
-            else:
-
-                close_type = mt5.ORDER_TYPE_BUY
-                price = ask()
-
-            request = {
-                "action": mt5.TRADE_ACTION_DEAL,
-                "symbol": SYMBOL,
-                "position": p.ticket,
-                "volume": p.volume,
-                "type": close_type,
-                "price": price,
-                "deviation": SLIPPAGE
-            }
-
-            mt5.order_send(request)
-
-    # REMOVE PENDING
+    # CANCEL PENDING ORDERS
     orders = mt5.orders_get(symbol=SYMBOL)
-
     if orders:
-
         for o in orders:
-
-            mt5.order_send({
-                "action": mt5.TRADE_ACTION_REMOVE,
-                "order": o.ticket
-            })
+            if o.magic in (MAGIC_P1, MAGIC_P2):
+                mt5.order_send({
+                    "action": mt5.TRADE_ACTION_REMOVE,
+                    "order": o.ticket
+                })
 
     play_close_sound()
-
     log("✅ ALL CLOSED")
 
 # =========================================================
 # MAIN
 # =========================================================
 gap = float(input("Enter Gap: "))
+profit_pct = DEFAULT_TARGET_PERCENTAGE
 
 # =========================================================
-# PATTERN 1
-# BUY STATIC
-# SELL DOWNWARD
+# PATTERN 1: INITIAL MARKET BUY
 # =========================================================
-base_buy = market_order(
-    "BUY",
-    0.01,
-    MAGIC_P1
-)
+base_buy = market_order("BUY", 0.01, MAGIC_P1)
 
 if base_buy is None:
     quit()
 
 # =========================================================
-# PATTERN 2
-# SELL STATIC
-# BUY UPWARD
+# PATTERN 2: INITIAL SETUP
 # =========================================================
-base_sell = base_buy + gap
+base_sell = round(base_buy + gap, 2)
 
-# =========================================================
-# INITIAL ORDERS
-# =========================================================
+# Pattern 2 initial pending SELL
+place_pending("SELL", 0.01, base_sell, MAGIC_P2)
 
-# Pattern 2 initial SELL
-place_pending(
-    "SELL",
-    0.01,
-    base_sell,
-    MAGIC_P2
-)
-
-# Pattern 1 initial SELL
-place_pending(
-    "SELL",
-    0.02,
-    base_buy - gap,
-    MAGIC_P1
-)
+# Pattern 1 initial pending SELL
+place_pending("SELL", 0.02, round(base_buy - gap, 2), MAGIC_P1)
 
 # =========================================================
 # TRACKERS
 # =========================================================
-last_p1_positions = position_count(MAGIC_P1)
-last_p2_positions = position_count(MAGIC_P2)
+last_p1_count = len(get_active_positions(MAGIC_P1))
+last_p2_count = len(get_active_positions(MAGIC_P2))
 
 # NEXT VOLUMES
 p1_volume = 0.03
 p2_volume = 0.02
 
-# =========================================================
-# PRICE LOGIC
-# =========================================================
-
-# Pattern 1
-# 0.02 = base-gap
-# 0.04 = previous-1
-# 0.06 = previous-1
-
-p1_sell_price = (base_buy - gap) - 1
-
-# Pattern 2
-# 0.02 = base+gap
-# 0.04 = previous+1
-# 0.06 = previous+1
-
+# PRICE TRACKERS
+p1_sell_price = (base_buy - gap) - 1.0
 p2_buy_price = base_sell + gap
 
 # =========================================================
 # LOOP
 # =========================================================
 while True:
-
     time.sleep(1)
 
-    # =====================================================
-    # TARGET HIT
-    # =====================================================
-    if total_profit() >= TARGET_PROFIT:
+    # 1. Evaluate Target Profit Trigger
+    current_prof = total_profit()
+    target_prof = get_target_money_threshold(gap, profit_pct)
+    exec_vol = total_executed_volume()
 
-        log("🎯 TARGET HIT")
+    if exec_vol > 0:
+        log(f"Status: Positions Vol={exec_vol:.2f} | Current Profit=${current_prof:.2f} | Target=${target_prof:.2f}")
 
+    if target_prof > 0 and current_prof >= target_prof:
+        log(f"🎯 TARGET PROFIT HIT -> ${current_prof:.2f} >= ${target_prof:.2f}")
         close_all()
-
         break
 
-    # =====================================================
-    # CURRENT POSITIONS
-    # =====================================================
-    current_p1_positions = position_count(MAGIC_P1)
-    current_p2_positions = position_count(MAGIC_P2)
+    # 2. Check for NEW Executed Deals
+    active_p1 = len(get_active_positions(MAGIC_P1))
+    active_p2 = len(get_active_positions(MAGIC_P2))
 
-    # =====================================================
-    # PATTERN 1
-    # BUY STATIC
-    # SELL DOWN
-    # =====================================================
-    if current_p1_positions > last_p1_positions:
-
-        # ODD = BUY STATIC
-        if int(p1_volume * 100) % 2 == 1:
-
+    # Trigger next step ONLY when a pending order gets filled
+    if active_p1 > last_p1_count:
+        if int(round(p1_volume * 100)) % 2 == 1:
             side = "BUY"
-
             price = base_buy
-
-        # EVEN = SELL DOWNWARD
         else:
-
             side = "SELL"
-
             price = p1_sell_price
+            p1_sell_price -= 1.0
 
-            # continue -1
-            p1_sell_price -= 1
-
-        place_pending(
-            side,
-            round(p1_volume, 2),
-            price,
-            MAGIC_P1
-        )
-
+        place_pending(side, p1_volume, price, MAGIC_P1)
         p1_volume += 0.01
+        last_p1_count = active_p1
 
-        last_p1_positions = current_p1_positions
-
-    # =====================================================
-    # PATTERN 2
-    # SELL STATIC
-    # BUY UP
-    # =====================================================
-    if current_p2_positions > last_p2_positions:
-
-        # EVEN = BUY UPWARD
-        if int(p2_volume * 100) % 2 == 0:
-
+    if active_p2 > last_p2_count:
+        if int(round(p2_volume * 100)) % 2 == 0:
             side = "BUY"
-
             price = p2_buy_price
-
-            # continue +1
-            p2_buy_price += 1
-
-        # ODD = SELL STATIC
+            p2_buy_price += 1.0
         else:
-
             side = "SELL"
-
             price = base_sell
 
-        place_pending(
-            side,
-            round(p2_volume, 2),
-            price,
-            MAGIC_P2
-        )
-
+        place_pending(side, p2_volume, price, MAGIC_P2)
         p2_volume += 0.01
-
-        last_p2_positions = current_p2_positions
+        last_p2_count = active_p2

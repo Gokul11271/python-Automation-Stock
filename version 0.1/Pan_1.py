@@ -3,7 +3,7 @@ import time
 from datetime import datetime
 
 # ------------------- Config ------------------- #
-SYMBOL = "XAUUSD_"       # Trading symbol
+SYMBOL = "XAUUSD"       # Trading symbol
 SLIPPAGE = 50
 MAGIC = 12345
 LOSS_TARGET = 6.0       # Default loss stop in $

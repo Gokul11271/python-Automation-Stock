@@ -12,7 +12,7 @@ import matplotlib.pyplot as plt
 SYMBOL = "XAUUSD"
 
 MAGIC = 9090
-SLIPPAGE = 50
+SLIPPAGE = 100
 
 BASE_LOT = 0.01
 LOT_INCREMENT = 0.01
