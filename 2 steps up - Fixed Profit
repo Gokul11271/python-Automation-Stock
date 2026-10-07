@@ -11,7 +11,7 @@ MAGIC_P1 = 10001
 MAGIC_P2 = 10002
 
 SLIPPAGE = 100
-TARGET_PROFIT = 5
+TARGET_PROFIT = 50
 
 # =========================================================
 # INIT MT5

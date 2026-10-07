@@ -10,12 +10,16 @@ SYMBOL = "XAUUSD"
 MAGIC_P1 = 10001
 SLIPPAGE = 100
 
-DEFAULT_GAP = 2.0                    # Default gap size
-DEFAULT_TARGET_PERCENTAGE = 80.0   # Dynamic profit percentage
-MAX_LOSS_LIMIT = 500.0               # Max floating loss in USD (stops bot if hit)
-MAX_LOT_CAP = 0.50                  # Volume cap (stays at 0.10 after step 10)
+DEFAULT_GAP = 2.0                   # Starting gap (e.g., 36 -> 34)
+GAP_INCREMENT = 2.0                # Gap expansion per sell step (2 -> 4 -> 6)
+MAX_GAP_CAP = 10.0                   # Max gap cap (fixes at 36 -> 30 once reached)
+
+DEFAULT_TARGET_PERCENTAGE = 50    # Dynamic profit percentage
+MAX_LOSS_LIMIT = 1000.0              # Max floating loss in USD (stops bot if hit)
+MAX_LOT_CAP = 0.50                  # Volume cap (stays at max once reached)
 
 PROFIT_SOUND_PATH = r"C:\Users\hp\Downloads\cash-register-purchase-87313.mp3"
+LOSS_SOUND_PATH = r"C:\Users\hp\OneDrive\Desktop\python script\loss_automationsound.mp3"
 
 # =========================================================
 # SOUND INITIALIZATION
@@ -78,8 +82,9 @@ def play_close_sound():
     except Exception:
         pass
 
-def play_profit_sound(file_path=PROFIT_SOUND_PATH, repeat=2, gap_sec=0.1):
+def play_mp3_sound(file_path, repeat=2, gap_sec=0.1, label="🔊 Sound"):
     try:
+        print(f"{label} (×{repeat})")
         pygame.mixer.music.load(file_path)
         for _ in range(repeat):
             pygame.mixer.music.play()
@@ -203,24 +208,25 @@ def close_all(is_profit=True):
 
     play_close_sound()
     if is_profit:
-        play_profit_sound()
+        play_mp3_sound(PROFIT_SOUND_PATH, repeat=2, label="💰 Profit Sound")
+    else:
+        play_mp3_sound(LOSS_SOUND_PATH, repeat=2, label="🛑 Loss Sound")
     log("✅ ALL CLOSED")
 
 # =========================================================
 # STRATEGY RUN CYCLE
 # =========================================================
-def run_strategy_cycle(gap, profit_pct, loss_limit):
+def run_strategy_cycle(init_gap, gap_inc, max_gap, profit_pct, loss_limit):
     base_buy = market_order("BUY", 0.01, MAGIC_P1)
     if base_buy is None:
         return "FAILED"
 
-    # Initial pending sell for Pattern 1
-    place_pending("SELL", 0.02, round(base_buy - gap, 2), MAGIC_P1)
+    # Step 1: Initial sell placed relative to base_buy
+    current_gap = init_gap
+    place_pending("SELL", 0.02, round(base_buy - current_gap, 2), MAGIC_P1)
 
     last_p1_positions = len(get_active_positions(MAGIC_P1))
-    
     current_step = 3
-    p1_sell_price = round((base_buy - gap) - gap, 2)
 
     while True:
         time.sleep(1)
@@ -230,38 +236,39 @@ def run_strategy_cycle(gap, profit_pct, loss_limit):
         exec_vol = total_executed_volume()
 
         if exec_vol > 0:
-            log(f"Status: Executed Vol={exec_vol:.2f} | Profit=${current_prof:.2f} | Target=${target_prof:.2f} | Max Loss=-${loss_limit:.2f}")
+            log(f"Status: Vol={exec_vol:.2f} | Profit=${current_prof:.2f} | Target=${target_prof:.2f} | Max Loss=-${loss_limit:.2f} | Gap={current_gap:.2f}")
 
-        # Target Profit Hit
+        # Target Profit Check
         if target_prof > 0 and current_prof >= target_prof:
             log(f"🎯 TARGET PROFIT HIT -> ${current_prof:.2f} >= ${target_prof:.2f}")
             close_all(is_profit=True)
             return "PROFIT_HIT"
 
-        # Max Loss Limit Hit
+        # Max Loss Limit Check
         if current_prof <= -abs(loss_limit):
             log(f"🛑 MAX LOSS LIMIT HIT -> ${current_prof:.2f} <= -${abs(loss_limit):.2f}")
             close_all(is_profit=False)
             return "LOSS_HIT"
 
-        # Position tracking and next order placement
+        # Check for newly executed positions
         current_p1_positions = len(get_active_positions(MAGIC_P1))
 
         if current_p1_positions > last_p1_positions:
             raw_vol = round(current_step * 0.01, 2)
             assigned_volume = min(raw_vol, MAX_LOT_CAP)
 
-            # Odd = Buy Static | Even = Sell Downward
+            # Odd = Buy Static @ base_buy
             if current_step % 2 == 1:
                 side = "BUY"
                 price = base_buy
+            # Even = Sell Downward (widening until MAX_GAP_CAP, then fixed)
             else:
                 side = "SELL"
-                price = p1_sell_price
-                p1_sell_price = round(p1_sell_price - gap, 2)
+                current_gap = min(round(current_gap + gap_inc, 2), max_gap)
+                price = round(base_buy - current_gap, 2)
 
             place_pending(side, assigned_volume, price, MAGIC_P1)
-            
+
             current_step += 1
             last_p1_positions = current_p1_positions
 
@@ -275,22 +282,22 @@ is_automated = (mode_input == "2")
 log(f"Starting in {'AUTOMATION' if is_automated else 'MANUAL'} mode...")
 
 while True:
-    result = run_strategy_cycle(DEFAULT_GAP, DEFAULT_TARGET_PERCENTAGE, MAX_LOSS_LIMIT)
-    
+    result = run_strategy_cycle(DEFAULT_GAP, GAP_INCREMENT, MAX_GAP_CAP, DEFAULT_TARGET_PERCENTAGE, MAX_LOSS_LIMIT)
+
     # Mode 1: Manual Mode (Always exits after 1 cycle)
     if not is_automated:
         log("Manual run complete. Shutting down bot...")
         break
-    
-    # Mode 2: Automation Mode Logic
+
+    # Mode 2: Automation Mode Logic (Stops completely on Loss)
     if result == "LOSS_HIT":
         log("🛑 BOT SHUT DOWN: Max loss threshold reached. Loop halted permanently to protect account.")
         break
-    
+
     elif result == "PROFIT_HIT":
         log("🎯 Target profit reached! Restarting loop in 3 seconds...")
         time.sleep(3)
-        
+
     elif result == "FAILED":
         log("Initial order execution failed. Retrying in 5 seconds...")
         time.sleep(5)

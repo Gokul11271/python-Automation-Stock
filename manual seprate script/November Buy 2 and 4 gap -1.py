@@ -18,7 +18,7 @@ from datetime import datetime
 import pygame
 
 # ------------------- Config ------------------- #
-SYMBOL = "XAUUSD_"    # trading symbol (must match your MT5 symbol name)
+SYMBOL = "XAUUSD"    # trading symbol (must match your MT5 symbol name)
 SLIPPAGE = 500
 MAGIC = 12345
 LOSS_TARGET = 500.0       # equity loss stop (in $)
