@@ -12,7 +12,7 @@ SLIPPAGE = 100
 
 DEFAULT_GAP = 2.0                   # Starting gap (e.g., 36 -> 34)
 GAP_INCREMENT = 2.0                # Gap expansion per sell step (2 -> 4 -> 6)
-MAX_GAP_CAP = 10.0                   # Max gap cap (fixes at 36 -> 30 once reached)
+MAX_GAP_CAP = 6                   # Max gap cap (fixes at 36 -> 30 once reached)
 
 DEFAULT_TARGET_PERCENTAGE = 50    # Dynamic profit percentage
 MAX_LOSS_LIMIT = 1000.0              # Max floating loss in USD (stops bot if hit)
